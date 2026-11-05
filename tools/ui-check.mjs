@@ -94,11 +94,8 @@ try {
   if (!retryNotice?.includes('다시')) throw new Error('action failure does not leave a retry notice');
   await mobile.locator('.option-button').first().click();
   await mobile.waitForSelector('.task-complete h2');
-  const taskFocus = await mobile.evaluate(() => ({
-    tag: document.activeElement?.tagName,
-    text: document.activeElement?.textContent,
-  }));
-  if (taskFocus.tag !== 'H2' || !taskFocus.text?.includes('반영')) throw new Error('next game card did not receive focus');
+  await mobile.waitForFunction(() => document.activeElement?.matches('.task-complete h2')
+    && document.activeElement.textContent?.includes('반영'));
   await mobile.close();
 
   const queuedJoin = await fetch(`${origin}/api/join`, {
@@ -113,12 +110,11 @@ try {
   await queuedPage.waitForSelector('.practice-panel');
   await queuedPage.getByRole('button', { name: '신뢰 경계에서 두 입력을 비교한다.' }).click();
   await queuedPage.waitForSelector('.practice-next');
-  const feedbackFocus = await queuedPage.evaluate(() => document.activeElement?.classList.contains('practice-feedback'));
-  if (!feedbackFocus) throw new Error('practice explanation did not receive focus');
+  await queuedPage.waitForFunction(() => document.activeElement?.matches('.practice-feedback'));
   await queuedPage.locator('.practice-next').click();
   await queuedPage.getByText('PRACTICE 2/3').waitFor();
-  const practiceFocus = await queuedPage.evaluate(() => document.activeElement?.tagName);
-  if (practiceFocus !== 'H3') throw new Error('next practice question did not receive focus');
+  await queuedPage.waitForFunction(() => document.activeElement?.matches('.practice-panel h3')
+    && document.activeElement.textContent?.includes('문자열 하나'));
   await queuedPage.close();
 
   const screen = await browser.newPage({ viewport: { width: 1440, height: 900 } });
