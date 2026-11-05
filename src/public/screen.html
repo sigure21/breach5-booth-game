@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#050b13">
+  <title>BREACH//5 · Live Screen</title>
+  <link rel="stylesheet" href="/assets/app.css">
+</head>
+<body class="screen-body">
+  <div class="scanlines" aria-hidden="true"></div>
+  <main class="screen-shell">
+    <header class="screen-header">
+      <div>
+        <div class="eyebrow">OWASP KOREA 2026 · BOOTH LIVE</div>
+        <div class="screen-wordmark">BREACH<span>//5</span></div>
+      </div>
+      <div class="screen-clock">
+        <div class="screen-clock-label">
+          <span id="phase-label">연결 중</span>
+          <small id="phase-clock">단계 --:--</small>
+        </div>
+        <strong id="clock">05:00</strong>
+      </div>
+    </header>
+
+    <section class="screen-grid">
+      <article class="mission-panel panel">
+        <div class="panel-kicker">CURRENT INCIDENT</div>
+        <h1 id="scenario-title">두 명의 경비원</h1>
+        <p id="scenario-brief">같은 URL을 두 시스템이 다르게 해석하고 있습니다.</p>
+        <div id="phase-track" class="phase-track" aria-label="라운드 진행 단계"></div>
+
+        <div class="attack-graph" aria-label="공격 경로">
+          <div class="graph-node" data-step="DISCOVER"><span>01</span><b>증거</b><small>raw target</small></div>
+          <i aria-hidden="true"></i>
+          <div class="graph-node" data-step="BUILD"><span>02</span><b>Gateway</b><small>canonical</small></div>
+          <i aria-hidden="true"></i>
+          <div class="graph-node" data-step="EXECUTE"><span>03</span><b>Worker</b><small>raw value</small></div>
+          <i aria-hidden="true"></i>
+          <div class="graph-node" data-step="REVERIFY"><span>04</span><b>Patch</b><small>retest</small></div>
+        </div>
+
+        <div id="event-banner" class="event-banner">다음 패킷을 기다리는 중입니다.</div>
+      </article>
+
+      <aside class="join-panel panel">
+        <div class="panel-kicker">JOIN WITH YOUR PHONE</div>
+        <div id="join-mode" class="join-mode">현재 판 참가 확인 중</div>
+        <div class="qr-frame"><img src="/api/qr.svg" alt="모바일 참가 QR 코드"></div>
+        <p id="join-url" class="join-url"></p>
+        <div class="team-board">
+          <div class="team-card red-card">
+            <span>▲ RED</span><strong id="red-count">0</strong><small id="red-status">공격팀 · 대기</small>
+            <div class="meter"><i id="red-meter"></i></div>
+          </div>
+          <div class="versus">VS</div>
+          <div class="team-card blue-card">
+            <span>⬟ BLUE</span><strong id="blue-count">0</strong><small id="blue-status">방어팀 · 대기</small>
+            <div class="meter"><i id="blue-meter"></i></div>
+          </div>
+        </div>
+      </aside>
+    </section>
+
+    <footer class="screen-footer">
+      <div class="stat"><span>RED 승리</span><strong id="red-wins">0</strong></div>
+      <div class="stat"><span>침해 후 봉쇄</span><strong id="contained">0</strong></div>
+      <div class="stat"><span>BLUE 승리</span><strong id="blue-wins">0</strong></div>
+      <div class="next-round"><span>다음 판</span><b id="next-round-text">대기 인원 확인 중</b></div>
+    </footer>
+  </main>
+  <script type="module" src="/assets/screen.js"></script>
+</body>
+</html>
