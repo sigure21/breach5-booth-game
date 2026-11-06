@@ -61,7 +61,28 @@ test('session-heist evidence is fictional, bounded, and contains no runtime secr
     sh_forge: 'matching_state_flow', sh_gadget: 'bounded_sleep_reduce',
   });
   assert.match(preview.request, /Host: devsite-lab\.invalid/);
+  assert.match(preview.trace.join('\n'), /separate attacker serializer/);
   assert.match(preview.trace.join('\n'), /attacker-chosen/);
+  assert.match(preview.trace.join('\n'), /RCE primitive/);
+
+  const flowReady = scenario.attackFlow({
+    sh_surface: 'signed_not_encrypted', sh_anomaly: 'secret_reuse',
+    sh_decode: 'base64_zlib_tagged_json', sh_secret: 'pickle_client_secret',
+    sh_forge: 'matching_state_flow', sh_gadget: 'bounded_sleep_reduce',
+  });
+  assert.equal(flowReady.classification, 'ENGINE PROOF READY');
+  assert.equal(flowReady.steps.at(-1).status, 'READY');
+  const flowConfirmed = scenario.attackFlow({
+    sh_surface: 'signed_not_encrypted', sh_anomaly: 'secret_reuse',
+    sh_decode: 'base64_zlib_tagged_json', sh_secret: 'pickle_client_secret',
+    sh_forge: 'matching_state_flow', sh_gadget: 'bounded_sleep_reduce',
+  }, {
+    proofReached: true, recoveredSigningKeyUsed: true, forgedCookieAccepted: true,
+    callableInvoked: true, rcePrimitive: true,
+  });
+  assert.equal(flowConfirmed.classification, 'RCE primitive CONFIRMED');
+  assert.equal(flowConfirmed.steps.at(-1).status, 'CONFIRMED');
+  assert.match(flowConfirmed.safetyNote, /OS 명령 실행을 주장하지 않습니다/);
 
   const controls = scenario.publicTask('sh_control', {
     difficulty: 'ADVANCED',

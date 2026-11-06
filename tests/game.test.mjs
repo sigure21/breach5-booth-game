@@ -44,15 +44,23 @@ async function solveFullStack(scenarioId) {
   setNow(1_500); await store.tick();
   setNow(1_800); await store.tick();
   assert.equal(store.state(player.token).round.phase, 'DISCOVER');
+  assert.equal(store.state(player.token).attackFlow, null, 'attack flow must not reveal answers before execution');
   submitVisible(store, player, scenario, counter);
 
   setNow(2_100); await store.tick();
   assert.equal(store.state(player.token).round.phase, 'BUILD');
+  assert.equal(store.state(player.token).attackFlow, null, 'attack flow must stay hidden until a baseline exists');
   submitVisible(store, player, scenario, counter);
 
   setNow(2_400); await store.tick();
   assert.equal(store.state(player.token).round.phase, 'EXECUTE');
   assert.equal(store.state(player.token).execution.proofReached, true);
+  if (scenarioId === 'session-heist') {
+    assert.equal(store.state(player.token).attackFlow?.confirmed, true);
+    assert.equal(store.state(player.token).attackFlow?.steps.at(-1)?.status, 'CONFIRMED');
+  } else {
+    assert.equal(store.state(player.token).attackFlow, null);
+  }
 
   setNow(2_700); await store.tick();
   assert.equal(store.state(player.token).round.phase, 'DUEL');

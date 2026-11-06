@@ -12,7 +12,7 @@ export const metadata = Object.freeze({
   subtitle: '서명된 쿠키 안의 서명키',
   shortLabel: 'SESSION HEIST',
   category: 'Flask session / secret reuse / unsafe pickle',
-  briefing: 'Google DevSite 사례를 바탕으로 signed cookie에서 시작해 안전한 timing proof까지 추적합니다.',
+  briefing: 'Google DevSite 사례를 바탕으로 signed cookie에서 시작해 안전한 callable 실행 증명과 RCE primitive 판정까지 추적합니다.',
   source: 'Simon Koeck 공개 write-up 기반 교육용 모델',
   sourceUrl: 'https://simonkoeck.com/writeups/google-devsite-flask-session-pickle-rce',
   rewardClaim: '$90,000 reported by the researcher',
@@ -112,20 +112,21 @@ export const tasks = Object.freeze({
       { id: 'forge-shape', source: 'SESSION', kind: 'json', label: 'candidate', value: '{\n  "google_oauth2_csrf_token": "attacker-chosen",\n  "google_oauth2_flow_attacker-chosen": { " b": "<safe pickle>" }\n}', annotation: '두 위치의 state가 일치합니다.' },
     ],
     options: [
-      { id: 'matching_state_flow', label: 'state와 flow suffix 일치', technical: 'state="attacker-chosen"; key="google_oauth2_flow_attacker-chosen"', detail: 'callback lookup이 공격자 소유 bytes에 도달합니다.', observation: { beginner: '서명 검증 뒤 pickle sink까지 데이터 흐름이 연결됩니다.', advanced: 'lookup contract satisfied' } },
+      { id: 'matching_state_flow', label: 'state와 flow suffix 일치', technical: 'state="attacker-chosen"; key="google_oauth2_flow_attacker-chosen"', detail: '원 사건의 취약 모델에서는 callback이 공격자가 서명한 세션의 flow bytes를 찾습니다. lab은 같은 위치에 서버 소유 safe bytes를 대입합니다.', observation: { beginner: '서명 검증 뒤 pickle sink까지 데이터 흐름이 연결됩니다.', advanced: 'lookup contract satisfied' } },
       { id: 'mismatched_state', label: '서로 다른 state', technical: 'state="A"; key="..._B"', detail: 'callback이 flow key를 찾지 못합니다.', observation: { beginner: '`invalid_state` 대조군이 됩니다.', advanced: 'lookup miss' } },
       { id: 'missing_flow', label: 'flow key 생략', technical: 'no google_oauth2_flow_*', detail: '유효 서명이어도 역직렬화 입력이 없습니다.', observation: { beginner: '`missing_flow` 대조군이 됩니다.', advanced: 'missing input' } },
     ],
   },
   sh_gadget: {
-    phase: 'BUILD', team: 'RED', prompt: '운영 명령 없이 역직렬화 실행을 입증할 안전한 pickle 동작을 선택하세요.',
-    criterion: { beginner: '응답 시간과 인자 N의 상관관계로 `REDUCE` 실행을 입증합니다.', advanced: 'Choose a bounded, non-destructive execution oracle.' },
+    phase: 'BUILD', team: 'RED', prompt: 'callback의 pickle.loads가 RCE primitive까지 이어짐을 안전하게 입증할 동작을 선택하세요.',
+    criterion: { beginner: '`STACK_GLOBAL`과 `REDUCE`가 callable·인자를 결정합니다. lab에서는 같은 실행 경로를 서버 소유 50ms sleep으로 제한합니다.', advanced: 'Model attacker-controlled dispatch while proving the same sink with a server-owned bounded oracle.' },
     evidence: [
       { id: 'opcode', source: 'PICKLETOOLS', kind: 'pickle', label: 'complete server-owned safe pickle', value: safePickleOps, annotation: '실제 protocol 4 opcode입니다. lab에서는 50ms로 고정하며 shell·파일·네트워크를 사용하지 않습니다.' },
-      { id: 'controls', source: 'TEST PLAN', kind: 'timing', label: 'negative controls', value: 'no cookie → reject\nflipped signature → reject\nwrong state → reject\nsleep pickle → bounded delay', annotation: '단일 느린 응답이 아니라 음성 대조와 비교합니다.' },
+      { id: 'controls', source: 'TEST PLAN', kind: 'timing', label: 'negative controls', value: 'no cookie → reject\nflipped signature → reject\nwrong signing key → reject\nwrong state → reject\nsleep pickle → bounded delay', annotation: '회수 secret의 인과성과 callable 실행을 음성 대조로 확인합니다.' },
+      { id: 'rce-flow', source: 'DATA FLOW', kind: 'code', label: 'remote input to callable', value: 'recovered client_secret\n  → separate attacker signer creates session\n  → vulnerable server accepts signature\n  → callback selects google_oauth2_flow_<state> bytes\n  → pickle.loads(flow_blob)\n  → lab-safe time.sleep(0.05) dispatch\n  → modeled attacker-controlled RCE primitive', annotation: '실제 lab은 서버 소유 time.sleep payload만 대입합니다. 원 사건의 취약 경계에서는 같은 위치의 pickle bytes를 원격 세션이 제어합니다.' },
     ],
     options: [
-      { id: 'bounded_sleep_reduce', label: 'time.sleep(0.05)', technical: 'GLOBAL + REDUCE', detail: '비파괴 timing proof입니다.', observation: { beginner: 'callback의 pickle.loads 실행을 시간차로 확인합니다.', advanced: 'bounded oracle selected' } },
+      { id: 'bounded_sleep_reduce', label: 'time.sleep(0.05) · safe RCE oracle', technical: 'STACK_GLOBAL time.sleep + REDUCE(0.05)', detail: '실제 Python callable dispatch를 비파괴적으로 입증합니다.', observation: { beginner: '서버 소유 callable 실행이 확인됐고, 원 사건의 attacker-controlled pickle 조건과 결합해 RCE primitive를 모델링합니다.', advanced: 'bounded dispatch validates the modeled RCE primitive' } },
       { id: 'shell_command', label: 'os.system("id")', technical: 'shell execution', detail: '교육용 lab에서도 불필요하고 위험합니다.', observation: { beginner: '안전 정책에 의해 선택해서는 안 됩니다.', advanced: 'unsafe proof method' } },
       { id: 'network_callback', label: 'external callback', technical: 'socket.connect', detail: '외부 네트워크 proof는 격리 경계를 벗어납니다.', observation: { beginner: '안전 정책에 의해 선택해서는 안 됩니다.', advanced: 'out-of-scope egress' } },
     ],
@@ -145,13 +146,13 @@ export const tasks = Object.freeze({
   },
   sh_control: {
     phase: 'DUEL', team: 'RED', prompt: '지연이 네트워크 잡음이 아니라 pickle 실행임을 입증할 대조 세트를 선택하세요.',
-    criterion: { beginner: '서명·state·정상 flow 대조군과 여러 sleep 값을 비교합니다.', advanced: 'Choose controls that isolate deserialization as the causal variable.' },
+    criterion: { beginner: '서명·wrong-key·state·flow·정상 경로 대조군과 고정 50ms sleep을 비교합니다.', advanced: 'Choose controls that isolate deserialization as the causal variable.' },
     evidence: [
       { id: 'timings', source: 'CALLBACK', kind: 'timing', label: 'engine observation', value: 'baseline 실행 뒤 실제 timing과 control 결과가 이 카드에 삽입됩니다.', annotation: '고정 50ms bounded sleep과 동일 프로세스의 음성 대조를 비교합니다.' },
-      { id: 'rejects', source: 'CALLBACK', kind: 'log', label: 'required controls', value: 'no cookie → invalid_session\nflipped signature → invalid_session\nwrong state → invalid_state\nmissing flow → missing_flow\nreal flow → normal path\nbounded sleep → proof', annotation: '각 항목은 같은 callback evaluator에서 실제 실행됩니다.' },
+      { id: 'rejects', source: 'CALLBACK', kind: 'log', label: 'required controls', value: 'no cookie → invalid_session\nflipped signature → invalid_session\nwrong signing key → invalid_session\nwrong state → invalid_state\nmissing flow → missing_flow\nreal flow → normal path\nbounded sleep → proof', annotation: '각 항목은 같은 callback evaluator에서 실제 실행됩니다.' },
     ],
     options: [
-      { id: 'timing_and_negative_controls', label: 'bounded sleep + 5 controls', technical: 'no-cookie/signature/state/flow/normal + sleep(0.05)', detail: '고정 지연과 다섯 대조군으로 sink 실행과 다른 원인을 구분합니다.', observation: { beginner: '실제 callback evaluator의 여섯 결과가 모두 기대값과 일치합니다.', advanced: 'six callback controls complete' } },
+      { id: 'timing_and_negative_controls', label: 'bounded sleep + 6 controls', technical: 'no-cookie/flipped-signature/wrong-key/state/flow/normal + sleep(0.05)', detail: '고정 지연과 여섯 대조군으로 sink 실행과 다른 원인을 구분합니다.', observation: { beginner: '실제 callback evaluator의 일곱 결과가 모두 기대값과 일치합니다.', advanced: 'seven callback cases complete' } },
       { id: 'single_slow_request', label: '느린 요청 1개', technical: 'one sample', detail: '네트워크 변동과 구분할 수 없습니다.', observation: { beginner: '증거가 부족합니다.', advanced: 'insufficient control' } },
       { id: 'status_only', label: 'HTTP status만 비교', technical: 'status code', detail: '역직렬화 중 실행 여부를 시간 상관관계 없이 입증하기 어렵습니다.', observation: { beginner: '실행 oracle이 부족합니다.', advanced: 'weak oracle' } },
     ],
@@ -194,10 +195,50 @@ export function preview(choices) {
     request: `GET /oauth2callback?state=${state}&code=demo HTTP/1.1\nHost: devsite-lab.invalid\nCookie: session=<forged with ${secret}>`,
     trace: [
       `DECODE    ${decode}`,
+      `SIGNER    separate attacker serializer ← ${secret}`,
       `SESSION   csrf=${state}`,
       `FLOW KEY  ${flowKey}`,
-      `PICKLE    ${choices.sh_gadget === 'bounded_sleep_reduce' ? 'GLOBAL time.sleep; REDUCE(0.05)' : '[SAFE GADGET]'}`,
+      `CALLBACK  pickle.loads(session[${flowKey}])`,
+      `DISPATCH  ${choices.sh_gadget === 'bounded_sleep_reduce' ? 'STACK_GLOBAL time.sleep + REDUCE(0.05)' : '[SAFE CALLABLE PROOF]'}`,
+      `IMPACT    ${choices.sh_gadget === 'bounded_sleep_reduce' ? 'vulnerable design permits remote control of callable + arguments → RCE primitive' : '[IMPACT NOT YET PROVEN]'}`,
+      'SAFETY    lab executes only server-owned time.sleep(0.05); no shell/file/network',
     ],
+  };
+}
+
+function completed(choices, requirements) {
+  return requirements.every(([task, choice]) => choices?.[task] === choice);
+}
+
+export function attackFlow(choices = {}, execution = null) {
+  const chainReady = completed(choices, [
+    ['sh_surface', 'signed_not_encrypted'],
+    ['sh_anomaly', 'secret_reuse'],
+    ['sh_decode', 'base64_zlib_tagged_json'],
+    ['sh_secret', 'pickle_client_secret'],
+    ['sh_forge', 'matching_state_flow'],
+    ['sh_gadget', 'bounded_sleep_reduce'],
+  ]);
+  const confirmed = execution?.proofReached === true
+    && execution?.recoveredSigningKeyUsed === true
+    && execution?.forgedCookieAccepted === true
+    && execution?.callableInvoked === true && execution?.rcePrimitive === true;
+  const status = (requirements) => completed(choices, requirements) ? 'COMPLETE' : 'PENDING';
+  return {
+    title: 'RCE FLOW',
+    classification: confirmed
+      ? 'RCE primitive CONFIRMED'
+      : chainReady ? 'ENGINE PROOF READY' : 'CHAIN IN PROGRESS',
+    confirmed,
+    steps: [
+      { id: 'cookie', label: '1. Signed cookie payload 읽기', detail: '서명은 무결성만 제공하며 payload는 클라이언트가 디코딩할 수 있습니다.', status: status([['sh_surface', 'signed_not_encrypted']]) },
+      { id: 'credential', label: '2. TaggedJSON과 pickle에서 credential 회수', detail: 'pickle을 실행하지 않고 opcode에서 client_secret을 정적으로 읽습니다.', status: status([['sh_decode', 'base64_zlib_tagged_json'], ['sh_secret', 'pickle_client_secret']]) },
+      { id: 'reuse', label: '3. 회수 secret으로 별도 공격자 서명기 생성', detail: '회수한 값만 넣은 signer의 쿠키를 취약 서버 signer가 실제 수락해야 합니다.', status: status([['sh_anomaly', 'secret_reuse'], ['sh_secret', 'pickle_client_secret']]) },
+      { id: 'forge', label: '4. state와 flow key가 맞는 signed session 위조', detail: '취약 모델에서는 원격 클라이언트가 callback이 선택할 flow 위치를 제어합니다.', status: status([['sh_forge', 'matching_state_flow']]) },
+      { id: 'unpickle', label: '5. callback의 pickle.loads가 GLOBAL/REDUCE 실행', detail: '취약 모델의 callable·인자 제어 위치에 lab은 서버 소유 safe pickle만 넣습니다.', status: status([['sh_gadget', 'bounded_sleep_reduce']]) },
+      { id: 'impact', label: '6. Python callable dispatch → RCE primitive', detail: '격리 엔진의 실제 50ms callable 실행과 음성 대조가 모두 맞아야 확정됩니다.', status: confirmed ? 'CONFIRMED' : chainReady ? 'READY' : 'PENDING' },
+    ],
+    safetyNote: '안전 범위: 격리 엔진은 서버 소유 time.sleep(0.05)만 실행합니다. 실제 lab 참가자가 pickle bytes를 제공하지 않습니다. 원 사건의 원격 제어 조건과 동일한 sink의 callable dispatch를 결합해 RCE primitive를 검증하며, OS 명령 실행을 주장하지 않습니다.',
   };
 }
 
@@ -225,6 +266,7 @@ export const scenario = Object.freeze({
   taskIdsFor: (phase, team) => taskIdsForPhaseTeam(tasks, phase, team),
   aggregate: (actions) => aggregateTaskChoices(tasks, actions),
   preview,
+  attackFlow,
   baselineInput: (choices) => ({
     surface: choices.sh_surface,
     decode: choices.sh_decode,
@@ -236,6 +278,7 @@ export const scenario = Object.freeze({
   explanation: () => [
     'Flask signed cookie는 읽을 수 있었고 그 안의 pickled OAuth flow가 client_secret을 노출했습니다.',
     '동일한 secret이 session signing에도 재사용되어 공격자가 유효한 state/flow 세션을 위조했습니다.',
+    '별도 공격자 signer가 회수 secret으로 만든 쿠키를 취약 서버 signer가 수락했고, callback의 pickle.loads가 서버 소유 STACK_GLOBAL/REDUCE payload로 time.sleep(0.05)를 실제 호출했습니다. 원 사건에서는 같은 위치가 공격자 제어였으므로 RCE primitive가 성립하지만, lab 자체는 OS 명령 실행을 허용하지 않습니다.',
     '독립 signing key, server-side flow state, data-only schema로 client-controlled pickle sink를 제거해야 합니다.',
   ],
   scores(choices) {

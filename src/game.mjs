@@ -253,6 +253,8 @@ export class GameStore {
       });
     });
     const choices = round.scenario.aggregate(round.actions);
+    const attackFlow = round.baseline && typeof round.scenario.attackFlow === 'function'
+      ? round.scenario.attackFlow(choices, round.baseline) : null;
     const current = this.currentClock();
     const observations = [...round.actions.values()]
       .filter((action) => action.playerId === player.id)
@@ -281,6 +283,7 @@ export class GameStore {
       round: { ...clock, counts: this.teamCounts(round), maxPlayers: this.maxPlayers, mode: round.mode ?? 'PENDING' },
       tasks,
       observations,
+      attackFlow,
       labPreview: ['BUILD', 'EXECUTE', 'DUEL', 'REVERIFY', 'RESULT'].includes(clock.phase)
         ? round.scenario.preview(choices) : null,
       execution: round.baseline,

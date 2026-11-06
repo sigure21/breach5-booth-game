@@ -6,6 +6,7 @@ import {
   DeterministicAdjudicator,
   DeterministicSessionAdjudicator,
   ProxyPanicAdjudicator,
+  SessionHeistAdjudicator,
 } from '../src/adjudicator.mjs';
 
 async function mockEngine(status, body) {
@@ -81,6 +82,13 @@ test('session-heist deterministic verdict requires the complete semantic chain',
     secret: 'pickle_client_secret', forge: 'matching_state_flow', gadget: 'bounded_sleep_reduce',
   });
   assert.equal(correct.proofReached, true);
+  assert.equal(correct.recoveredSigningKeyUsed, true);
+  assert.equal(correct.forgedCookieAccepted, true);
+  assert.equal(correct.callableInvoked, true);
+  assert.equal(correct.rcePrimitive, true);
+  assert.equal(correct.proofType, 'bounded_python_callable_dispatch');
+  assert.equal(correct.safetyProfile, 'server_owned_time_sleep_50ms');
+  assert.match(correct.trace.join('\n'), /RCE primitive confirmed/);
   assert.match(correct.rawHttp, /devsite-lab\.invalid/);
   assert.ok(correct.controls.every(({ passed }) => passed));
 
@@ -89,6 +97,10 @@ test('session-heist deterministic verdict requires the complete semantic chain',
     secret: 'pickle_client_secret', forge: 'matching_state_flow', gadget: 'bounded_sleep_reduce',
   });
   assert.equal(wrong.proofReached, false);
+  assert.equal(wrong.recoveredSigningKeyUsed, false);
+  assert.equal(wrong.forgedCookieAccepted, false);
+  assert.equal(wrong.callableInvoked, false);
+  assert.equal(wrong.rcePrimitive, false);
 
   const partial = await adjudicator.runPatch({ patch: 'separate_secret_only', control: 'timing_and_negative_controls' });
   const complete = await adjudicator.runPatch({ patch: 'server_side_json_bundle', control: 'timing_and_negative_controls' });
@@ -96,6 +108,49 @@ test('session-heist deterministic verdict requires the complete semantic chain',
   assert.equal(partial.variant.proofReached, true);
   assert.equal(complete.effective, true);
   assert.equal(complete.normal.passed, true);
+});
+
+test('session engine cannot claim proof with contradictory chain signals', async (context) => {
+  const valid = {
+    proofReached: true,
+    recoveredSigningKeyUsed: true,
+    forgedCookieAccepted: true,
+    callableInvoked: true,
+    rcePrimitive: true,
+    proofType: 'bounded_python_callable_dispatch',
+    safetyProfile: 'server_owned_time_sleep_50ms',
+    blocked: false,
+    reason: 'proof',
+    controls: [{ id: 'wrong_key_signature', passed: true, reason: 'invalid_session' }],
+  };
+  const cases = [
+    ['missing recovered-key signer', { recoveredSigningKeyUsed: false }],
+    ['forged cookie was not accepted', { forgedCookieAccepted: false }],
+    ['callable and RCE disagree', { rcePrimitive: false }],
+    ['false proof uses the success proof type', {
+      proofReached: false, recoveredSigningKeyUsed: false, forgedCookieAccepted: false,
+      callableInvoked: false, rcePrimitive: false, proofType: 'bounded_python_callable_dispatch', blocked: true,
+    }],
+    ['false proof is not blocked', {
+      proofReached: false, recoveredSigningKeyUsed: false, forgedCookieAccepted: false,
+      callableInvoked: false, rcePrimitive: false, proofType: 'not_reached', blocked: false,
+    }],
+    ['successful proof is marked blocked', { blocked: true }],
+    ['wrong-key control is missing', { controls: [] }],
+  ];
+  for (const [name, overrides] of cases) {
+    await context.test(name, async (subtest) => {
+      const engine = await mockEngine(200, { ...valid, ...overrides });
+      subtest.after(() => new Promise((resolve) => engine.close(resolve)));
+      const adjudicator = new SessionHeistAdjudicator({
+        host: '127.0.0.1', port: engine.address().port, token: 'c'.repeat(64),
+      });
+      await assert.rejects(adjudicator.runBaseline({
+        surface: 'signed_not_encrypted', decode: 'base64_zlib_tagged_json',
+        secret: 'pickle_client_secret', forge: 'matching_state_flow', gadget: 'bounded_sleep_reduce',
+      }), /inconsistent session RCE verdict/);
+    });
+  }
 });
 
 test('deterministic registry contains a separate adjudicator for each scenario', async () => {

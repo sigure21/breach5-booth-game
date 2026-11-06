@@ -31,7 +31,10 @@ test('session engine is internal, least-privileged, and accepts semantic selecti
   assert.match(dockerfile, /USER sessionlab/);
   assert.match(engine, /set\(body\) != \{"operation", "selection"\}/);
   assert.match(engine, /SLEEP_SECONDS = 0\.05/);
-  assert.doesNotMatch(engine, /import subprocess|import socket|requests\.|urllib\./);
+  assert.match(engine, /def _attacker_serializer\(recovered_secret: str\)/);
+  assert.match(engine, /attacker_app\.secret_key = recovered_secret/);
+  assert.match(engine, /self\._callback\(forged, STATE, server_serializer\)/);
+  assert.doesNotMatch(engine, /import subprocess|import socket|os\.system|os\.popen|subprocess\.|socket\.|requests\.|urllib\./);
   assert.doesNotMatch(engine, /[a-f0-9]{64}/i);
 });
 

@@ -1,7 +1,8 @@
-import { existsSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
 import { chromium } from 'playwright-core';
 import { createDeterministicRegistry } from '../src/adjudicator.mjs';
 import { GameStore } from '../src/game.mjs';
+import { getScenario } from '../src/scenarios/index.mjs';
 import { createGameServer } from '../src/server.mjs';
 
 const candidates = [
@@ -40,9 +41,155 @@ async function api(path, { token, method = 'GET', body } = {}) {
   return value;
 }
 
+function safeLabel(value) {
+  return value.replaceAll(/[^a-zA-Z0-9_-]+/g, '-').slice(0, 100);
+}
+
+async function assertNoNestedOverflow(page, label) {
+  const issues = await page.evaluate(() => {
+    const viewportWidth = document.documentElement.clientWidth;
+    const ignored = (element) => element.matches([
+      '.ambient',
+      '.landing-card',
+      '.result-card',
+      '.identity-card strong',
+      '.join-url',
+      '.phase-track span',
+    ].join(','));
+    const selector = (element) => {
+      const name = element.tagName.toLowerCase();
+      const id = element.id ? `#${element.id}` : '';
+      const classes = [...element.classList].slice(0, 3).map((value) => `.${value}`).join('');
+      return `${name}${id}${classes}`;
+    };
+    return [...document.querySelectorAll('body *')].flatMap((element) => {
+      const style = getComputedStyle(element);
+      const rect = element.getBoundingClientRect();
+      if (ignored(element) || rect.width < 1 || rect.height < 1
+        || style.display === 'none' || style.visibility === 'hidden') return [];
+      const escapesViewport = style.position !== 'fixed'
+        && (rect.left < -0.5 || rect.right > viewportWidth + 0.5);
+      const hasHorizontalOverflow = element.scrollWidth > element.clientWidth + 1;
+      if (!escapesViewport && !hasHorizontalOverflow) return [];
+      return [{
+        selector: selector(element),
+        clientWidth: element.clientWidth,
+        scrollWidth: element.scrollWidth,
+        left: Math.round(rect.left * 10) / 10,
+        right: Math.round(rect.right * 10) / 10,
+        viewportWidth,
+        escapesViewport,
+        hasHorizontalOverflow,
+        text: (element.textContent ?? '').trim().replaceAll(/\s+/g, ' ').slice(0, 100),
+      }];
+    });
+  });
+  if (issues.length === 0) return;
+  mkdirSync('test-results/overflow', { recursive: true });
+  const screenshot = `test-results/overflow/${safeLabel(label)}.png`;
+  await page.screenshot({ path: screenshot, fullPage: true });
+  throw new Error(`${label} nested overflow: ${JSON.stringify(issues.slice(0, 12))}; screenshot=${screenshot}`);
+}
+
+async function auditFullStackFlow(scenarioId, difficulty, width) {
+  let auditNow = 0;
+  const auditAdjudicator = createDeterministicRegistry();
+  const auditStore = new GameStore({ now: () => auditNow, adjudicators: auditAdjudicator });
+  const auditServer = await createGameServer({
+    store: auditStore, adjudicator: auditAdjudicator, publicBaseUrl: 'http://127.0.0.1',
+  });
+  await new Promise((resolve) => auditServer.listen(0, '127.0.0.1', resolve));
+  const auditOrigin = `http://127.0.0.1:${auditServer.address().port}`;
+  const joinResponse = await fetch(`${auditOrigin}/api/join`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ deviceId: 'd'.repeat(32), scenarioId, difficulty }),
+  });
+  const player = await joinResponse.json();
+  if (!joinResponse.ok) throw new Error(`overflow audit join failed: ${JSON.stringify(player)}`);
+  const page = await browser.newPage({ viewport: { width, height: width === 320 ? 568 : 844 } });
+  await page.addInitScript((token) => sessionStorage.setItem('breach5-player-token', token), player.token);
+  const scenario = getScenario(scenarioId);
+  const phases = new Set();
+  let actionSequence = 0;
+  try {
+    auditNow = 15_000;
+    await auditStore.tick();
+    await page.goto(`${auditOrigin}/play`);
+    await page.waitForSelector('.mission-card');
+    phases.add(auditStore.state(player.token).round.phase);
+    await assertNoNestedOverflow(page, `${scenarioId}-${difficulty}-${width}-brief`);
+
+    auditNow = 18_000;
+    await auditStore.tick();
+    for (let step = 0; step < 40; step += 1) {
+      const state = auditStore.state(player.token);
+      phases.add(state.round.phase);
+      await page.goto(`${auditOrigin}/play`);
+      await page.waitForSelector('.mission-card');
+      const stateLabel = `${scenarioId}-${difficulty}-${width}-${state.round.phase}-${step}`;
+      await assertNoNestedOverflow(page, `${stateLabel}-base`);
+      if (scenarioId === 'session-heist' && ['DISCOVER', 'BUILD'].includes(state.round.phase)) {
+        if (state.attackFlow !== null) throw new Error(`RCE flow leaked before execution in ${state.round.phase}`);
+        if (await page.locator('.attack-flow').count()) throw new Error(`RCE flow UI leaked before execution in ${state.round.phase}`);
+      }
+      const task = state.tasks.find((item) => !item.selected);
+      if (task) {
+        const tabCount = await page.locator('.evidence-tab').count();
+        for (let index = 0; index < tabCount; index += 1) {
+          await page.locator('.evidence-tab').nth(index).click();
+          await assertNoNestedOverflow(page, `${stateLabel}-${task.id}-evidence-${index}`);
+        }
+        const expected = Array.isArray(scenario.correct[task.id])
+          ? scenario.correct[task.id][0] : scenario.correct[task.id];
+        const optionIndex = task.options.findIndex((option) => option.id === expected);
+        if (optionIndex < 0) throw new Error(`missing correct option for ${task.id}`);
+        await page.locator('.option-button').nth(optionIndex).click();
+        await page.waitForSelector('#confirm-choice:not([disabled])');
+        await assertNoNestedOverflow(page, `${stateLabel}-${task.id}-preview`);
+        const previous = state.observations.length;
+        await page.locator('#confirm-choice').click();
+        for (let wait = 0; wait < 100 && auditStore.state(player.token).observations.length === previous; wait += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        actionSequence += 1;
+        continue;
+      }
+      if (state.round.phase === 'RESULT') {
+        const rawDetails = page.locator('.raw-details');
+        if (await rawDetails.count()) {
+          await rawDetails.locator('summary').click();
+          await assertNoNestedOverflow(page, `${stateLabel}-raw-open`);
+        }
+        if (scenarioId === 'session-heist') {
+          await page.getByText('RCE primitive CONFIRMED', { exact: true }).waitFor();
+          if (state.attackFlow?.steps?.at(-1)?.status !== 'CONFIRMED') throw new Error('RCE flow did not reach confirmed state');
+        }
+        await page.goto(`${auditOrigin}/screen`);
+        await page.waitForSelector('.lane-card');
+        if (scenarioId === 'session-heist') {
+          await page.getByText(/RCE PRIMITIVE CONFIRMED/).waitFor();
+        }
+        await assertNoNestedOverflow(page, `${stateLabel}-spectator-result`);
+        break;
+      }
+      auditNow += 3_000;
+      await auditStore.tick();
+    }
+    for (const phase of ['BRIEF', 'DISCOVER', 'BUILD', 'EXECUTE', 'DUEL', 'REVERIFY', 'RESULT']) {
+      if (!phases.has(phase)) throw new Error(`${scenarioId}/${difficulty} missed ${phase} in overflow audit`);
+    }
+    if (actionSequence !== Object.keys(scenario.tasks).length) {
+      throw new Error(`${scenarioId}/${difficulty} audited ${actionSequence} actions, expected ${Object.keys(scenario.tasks).length}`);
+    }
+  } finally {
+    await page.close();
+    await new Promise((resolve) => auditServer.close(resolve));
+  }
+}
+
 try {
   browser = await chromium.launch({ headless: true, executablePath });
-  for (const viewport of [{ width: 360, height: 640 }, { width: 390, height: 844 }, { width: 412, height: 915 }]) {
+  for (const viewport of [{ width: 320, height: 568 }, { width: 360, height: 640 }, { width: 390, height: 844 }, { width: 412, height: 915 }]) {
     const page = await browser.newPage({ viewport });
     await page.goto(`${origin}/play`);
     await page.waitForSelector('.lobby-card');
@@ -56,6 +203,7 @@ try {
       minButtonHeight: Math.min(...[...document.querySelectorAll('button')].map((button) => button.getBoundingClientRect().height)),
     }));
     if (before.documentWidth > before.viewport) throw new Error(`lobby horizontal overflow at ${viewport.width}px`);
+    await assertNoNestedOverflow(page, `lobby-${viewport.width}`);
     if (before.inputCount !== 0) throw new Error('lobby unexpectedly requires free-form input');
     if (!before.joinDisabled || before.scenarioCount !== 2 || before.difficultyCount !== 2) throw new Error('lobby selection gate is incomplete');
     if (before.minButtonHeight < 44) throw new Error(`lobby touch target below 44px at ${viewport.width}px`);
@@ -102,11 +250,15 @@ try {
     annotations: document.querySelectorAll('.evidence-annotation').length,
     codePaneCount: document.querySelectorAll('.code-pane').length,
     minButtonHeight: Math.min(...[...document.querySelectorAll('button')].map((button) => button.getBoundingClientRect().height)),
-    codePanesContained: [...document.querySelectorAll('.code-pane')].every((pane) => getComputedStyle(pane).overflowX === 'auto'),
+    codePanesWrapped: [...document.querySelectorAll('.code-pane')].every((pane) => {
+      const style = getComputedStyle(pane);
+      return style.whiteSpace === 'pre-wrap' && pane.scrollWidth <= pane.clientWidth + 1;
+    }),
   }));
   if (taskMetrics.documentWidth > taskMetrics.viewport) throw new Error('task screen has horizontal overflow');
   if (taskMetrics.annotations < 1 || taskMetrics.codePaneCount < 1) throw new Error('beginner evidence deck is incomplete');
-  if (taskMetrics.minButtonHeight < 44 || !taskMetrics.codePanesContained) throw new Error('task touch/overflow contract failed');
+  if (taskMetrics.minButtonHeight < 44 || !taskMetrics.codePanesWrapped) throw new Error('task touch/wrapping contract failed');
+  await assertNoNestedOverflow(mobile, 'proxy-beginner-first-task-390');
 
   await mobile.locator('.option-button').first().click();
   if (!(await mobile.locator('#confirm-choice').isDisabled())) throw new Error('confirm enabled before the server preview completed');
@@ -131,20 +283,32 @@ try {
   if (!(await analyst.locator('.advanced-note').count())) throw new Error('advanced mode did not render raw-evidence instruction');
   await analyst.close();
 
-  const screen = await browser.newPage({ viewport: { width: 1440, height: 900 } });
-  await screen.goto(`${origin}/screen`);
-  await screen.waitForSelector('.lane-card');
-  const screenMetrics = await screen.evaluate(() => ({
-    viewport: innerWidth,
-    documentWidth: document.documentElement.scrollWidth,
-    lanes: document.querySelectorAll('.lane-card').length,
-    qrReady: document.querySelector('.qr-frame img')?.naturalWidth > 0,
-  }));
-  if (screenMetrics.documentWidth > screenMetrics.viewport) throw new Error('spectator screen has horizontal overflow');
-  if (screenMetrics.lanes !== 2 || !screenMetrics.qrReady) throw new Error('spectator lane or QR rendering failed');
-  await screen.close();
+  for (const viewport of [
+    { width: 320, height: 568 }, { width: 360, height: 640 }, { width: 760, height: 900 },
+    { width: 900, height: 900 }, { width: 901, height: 900 }, { width: 1440, height: 900 },
+  ]) {
+    const screen = await browser.newPage({ viewport });
+    await screen.goto(`${origin}/screen`);
+    await screen.waitForSelector('.lane-card');
+    const screenMetrics = await screen.evaluate(() => ({
+      viewport: innerWidth,
+      documentWidth: document.documentElement.scrollWidth,
+      lanes: document.querySelectorAll('.lane-card').length,
+      qrReady: document.querySelector('.qr-frame img')?.naturalWidth > 0,
+    }));
+    if (screenMetrics.documentWidth > screenMetrics.viewport) throw new Error(`spectator screen has horizontal overflow at ${viewport.width}px`);
+    if (screenMetrics.lanes !== 2 || !screenMetrics.qrReady) throw new Error('spectator lane or QR rendering failed');
+    await assertNoNestedOverflow(screen, `spectator-${viewport.width}`);
+    await screen.close();
+  }
 
-  console.log('UI layout and interaction check passed at 360, 390, 412, and 1440px.');
+  for (const scenarioId of ['proxy-panic', 'session-heist']) {
+    for (const difficulty of ['BEGINNER', 'ADVANCED']) {
+      await auditFullStackFlow(scenarioId, difficulty, 320);
+    }
+  }
+
+  console.log('UI layout, wrapping, and full-flow interaction checks passed at 320-1440px.');
 } finally {
   if (browser) await browser.close();
   await new Promise((resolve) => server.close(resolve));

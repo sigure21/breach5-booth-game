@@ -96,8 +96,9 @@ function laneCard(lane, index) {
 
   const foot = element('div', 'lane-foot');
   const result = lane.result;
+  const impact = result?.baseline?.rcePrimitive === true ? ' · RCE PRIMITIVE CONFIRMED' : '';
   const resultText = result
-    ? `${RESULT_LABELS[result.outcome] ?? result.outcome} · RED ${result.redScore ?? 0}/${result.redPossible ?? '?'} · BLUE ${result.blueScore ?? 0}/${result.bluePossible ?? '?'}`
+    ? `${RESULT_LABELS[result.outcome] ?? result.outcome} · RED ${result.redScore ?? 0}/${result.redPossible ?? '?'} · BLUE ${result.blueScore ?? 0}/${result.bluePossible ?? '?'}${impact}`
     : `${counts.total}명 · ${round.mode ?? lane.mode ?? '배정 대기'}`;
   foot.append(element('span', result ? 'lane-result' : '', resultText), element('strong', '', formatTime(round.phaseRemainingMs ?? lane.phaseRemainingMs)));
   card.append(foot);

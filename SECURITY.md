@@ -38,12 +38,21 @@ Python session engine은 다음 서버 소유 데이터만 생성·처리합니�
 
 - lab에서 발급한 compressed Flask session
 - lab이 생성한 pickled OAuth-style flow
-- lab이 생성한 forged session
+- 쿠키에서 회수한 secret만 받은 별도 공격자 signer가 생성한 forged session
 - 정확히 50ms로 제한된 in-process timing probe pickle
 
 UI에 포함된 decode 가능한 cookie/pickle artifact는 고정된 공개 demo fixture입니다. 그 안의 명시적 demo credential은 교육 데이터이며 `.runtime/booth.env`의 `SESSION_LAB_CLIENT_SECRET`과 동일하지 않습니다. 엔진은 런타임 fixture와 forged cookie 원문을 coordinator에 반환하지 않습니다.
 
 브라우저나 coordinator 요청에서 cookie/pickle bytes, callable, delay, command, path, host를 받지 않습니다. 실행 가능한 pickle은 서버가 코드 안에서 생성하며 shell, 파일 접근, subprocess, socket 또는 외부 네트워크를 호출하지 않습니다.
+
+엔진의 `RCE primitive CONFIRMED`는 다음 조건이 모두 실제로 맞을 때만 반환됩니다.
+
+- 회수한 역할 재사용 secret만 받은 별도 공격자 signer가 forged Flask session을 생성함
+- 취약 서버 signer가 그 쿠키를 수락하고 callback이 공격자 state와 일치하는 flow 위치를 선택함
+- `pickle.loads()`가 `STACK_GLOBAL`/`REDUCE`의 `time.sleep(0.05)` callable을 실제 호출함
+- no-cookie, 변조 서명, wrong-key, wrong-state, missing-flow, 정상 flow, bounded-sleep 대조군이 모두 기대 결과와 일치함
+
+원 사건의 취약 설계에서는 원격 세션이 pickle bytes를 제어할 수 있었습니다. 실제 lab은 같은 sink에 서버 소유 `time.sleep(0.05)` payload만 대입해 callable dispatch를 확인합니다. 따라서 이 판정은 원 사건의 attacker-controlled 조건과 안전한 실제 sink 실행을 결합한 RCE primitive 검증이며, 실제 OS 명령 실행을 재현했다는 주장이 아닙니다.
 
 다음 secret은 각기 다른 환경값으로 생성됩니다.
 

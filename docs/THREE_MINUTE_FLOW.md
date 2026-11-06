@@ -96,14 +96,16 @@ At minimum, the participant sees:
 - signed-cookie payload, timestamp, and signature boundaries;
 - zlib/Base64URL/TaggedJSON decode evidence;
 - static pickle opcode evidence identifying an OAuth-style client secret;
-- the hypothesis that this secret also signs Flask sessions;
+- a separate attacker-side serializer initialized only from that recovered secret;
+- actual acceptance of its forged cookie by the vulnerable server serializer;
 - the state-to-flow-key lookup contract;
-- a bounded timing gadget and signature/state/flow negative controls;
+- an actual bounded Python callable dispatch and wrong-key/signature/state/flow negative controls;
+- an engine-authenticated `RCE primitive CONFIRMED` result only after callable execution and all controls agree;
 - patch diffs for independent keys, server-side flow state, and data-only schema validation.
 
 The scenario is based on [Simon Koeck's public write-up](https://simonkoeck.com/writeups/google-devsite-flask-session-pickle-rce). The `$90,000` label is the researcher's reported `$75,000 × 1.2` reward, not an independently verified payment claim and not a CVE identifier.
 
-All request previews use `devsite-lab.invalid`. No code may contact a real Google host. The browser cannot supply a cookie or pickle; the internal engine constructs both from allowlisted semantic choices. The only executable pickle is engine-owned and invokes a fixed, bounded local timing probe.
+All request previews use `devsite-lab.invalid`. No code may contact a real Google host. The browser cannot supply a cookie or pickle; the internal engine constructs both from allowlisted semantic choices. The engine statically recovers the credential, uses only that value in a separate attacker-side serializer, and requires the vulnerable server serializer to accept the resulting cookie. The only executable pickle is engine-owned and invokes a fixed, bounded local `time.sleep(0.05)` callable. The original case supplied the attacker-controlled-pickle condition; this lab safely proves the same sink's callable-dispatch primitive without running an OS command, reading a file, starting a subprocess, or opening a socket.
 
 ## Mobile interaction contract
 
@@ -116,7 +118,7 @@ The core participant components are:
 
 Choosing an option changes only a local pending selection. A separate confirm control submits it. This prevents an exploratory first tap from becoming an irreversible server action.
 
-The document must have no horizontal overflow at 360, 390, or 412 CSS pixels. Wide code artifacts may scroll inside their own code pane. All actions must have a tap alternative; dragging and software-keyboard input are not required.
+The document and every nested card must have no horizontal overflow at 320, 360, 390, or 412 CSS pixels. Long code, cookie, pickle, token, request, and diff artifacts must preserve line breaks and automatically wrap inside their own pane; horizontal scrolling is not part of the interaction. All actions must have a tap alternative; dragging and software-keyboard input are not required.
 
 ## Team and solo semantics
 

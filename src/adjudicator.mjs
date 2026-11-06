@@ -183,11 +183,31 @@ export class SessionHeistAdjudicator {
     const body = assertSessionHttp(await sessionRequest({
       host: this.host, port: this.port, token: this.token, operation: 'baseline', selection,
     }));
-    if (typeof body.proofReached !== 'boolean' || typeof body.blocked !== 'boolean' || typeof body.reason !== 'string') {
+    if (typeof body.proofReached !== 'boolean' || typeof body.recoveredSigningKeyUsed !== 'boolean'
+      || typeof body.forgedCookieAccepted !== 'boolean' || typeof body.callableInvoked !== 'boolean'
+      || typeof body.rcePrimitive !== 'boolean' || typeof body.blocked !== 'boolean'
+      || typeof body.reason !== 'string' || typeof body.proofType !== 'string'
+      || typeof body.safetyProfile !== 'string') {
       throw new Error('invalid session baseline verdict');
     }
+    const wrongKeyControl = Array.isArray(body.controls)
+      ? body.controls.find((control) => control?.id === 'wrong_key_signature') : null;
+    if (body.proofReached !== body.recoveredSigningKeyUsed
+      || body.proofReached !== body.forgedCookieAccepted
+      || body.proofReached !== body.callableInvoked || body.proofReached !== body.rcePrimitive
+      || (body.rcePrimitive && body.proofType !== 'bounded_python_callable_dispatch')
+      || (!body.rcePrimitive && body.proofType !== 'not_reached')
+      || body.blocked === body.proofReached
+      || (body.proofReached && (wrongKeyControl?.passed !== true || wrongKeyControl?.reason !== 'invalid_session'))
+      || body.safetyProfile !== 'server_owned_time_sleep_50ms') {
+      throw new Error('inconsistent session RCE verdict');
+    }
     return {
-      status: 200, proofReached: body.proofReached, blocked: body.blocked,
+      status: 200, proofReached: body.proofReached,
+      recoveredSigningKeyUsed: body.recoveredSigningKeyUsed,
+      forgedCookieAccepted: body.forgedCookieAccepted, callableInvoked: body.callableInvoked,
+      rcePrimitive: body.rcePrimitive, blocked: body.blocked,
+      proofType: sanitizeText(body.proofType, 80), safetyProfile: sanitizeText(body.safetyProfile, 80),
       reason: sanitizeText(body.reason, 100), rawHttp: sanitizeText(body.rawHttp, 800),
       trace: Array.isArray(body.trace) ? body.trace.slice(0, 12).map((value) => sanitizeText(value, 240)).filter(Boolean) : [],
       controls: Array.isArray(body.controls) ? body.controls.slice(0, 8).map(sanitizeControl).filter(Boolean) : [],
@@ -283,13 +303,27 @@ export class DeterministicSessionAdjudicator {
       && selection.decode === 'base64_zlib_tagged_json' && selection.secret === 'pickle_client_secret'
       && selection.forge === 'matching_state_flow' && selection.gadget === 'bounded_sleep_reduce';
     return {
-      status: 200, proofReached, blocked: false,
-      reason: proofReached ? 'bounded_timing_proof_observed' : 'chain_incomplete',
+      status: 200, proofReached, recoveredSigningKeyUsed: proofReached,
+      forgedCookieAccepted: proofReached, callableInvoked: proofReached,
+      rcePrimitive: proofReached, blocked: !proofReached,
+      proofType: proofReached ? 'bounded_python_callable_dispatch' : 'not_reached',
+      safetyProfile: 'server_owned_time_sleep_50ms',
+      reason: proofReached ? 'rce_primitive_confirmed_with_bounded_callable' : 'chain_incomplete',
       rawHttp: 'GET /oauth2callback?state=attacker-chosen&code=demo HTTP/1.1\nHost: devsite-lab.invalid\nCookie: session=<server-owned-forged-cookie>',
-      trace: proofReached ? ['cookie signature accepted', 'state matched server-owned lab payload', 'bounded sleep observed'] : ['one or more choices contradicted the evidence'],
+      trace: proofReached ? [
+        'COOKIE compressed payload decoded',
+        'CREDENTIAL client_secret recovered statically from pickle opcodes',
+        'SIGNER separate attacker serializer initialized only from recovered client_secret',
+        'SIGNATURE attacker-signed forged session accepted by vulnerable server serializer',
+        'LOOKUP vulnerable callback selected the lab-safe payload at attacker-chosen state/flow position',
+        'UNPICKLE STACK_GLOBAL + REDUCE invoked time.sleep(0.05)',
+        'MODELED_CONTROL original vulnerability allows attacker-controlled pickle; lab substitutes server-owned safe bytes',
+        'CLASSIFICATION RCE primitive confirmed; shell/file/network disabled in lab',
+      ] : ['one or more choices contradicted the evidence'],
       controls: proofReached ? [
         { id: 'no_cookie', passed: true, reason: 'invalid_session', timingMs: 0.2 },
         { id: 'flipped_signature', passed: true, reason: 'invalid_session', timingMs: 0.3 },
+        { id: 'wrong_key_signature', passed: true, reason: 'invalid_session', timingMs: 0.3 },
         { id: 'wrong_state', passed: true, reason: 'invalid_state', timingMs: 0.3 },
         { id: 'missing_flow', passed: true, reason: 'missing_flow', timingMs: 0.3 },
         { id: 'real_flow', passed: true, reason: 'fictional_oauth_exchange_reached', timingMs: 0.5 },

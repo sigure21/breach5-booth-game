@@ -162,7 +162,20 @@ for (const player of players) {
 }
 const sessionFinal = finalStates.get(players[2].token);
 assert.match(sessionFinal.result.baseline.rawHttp, /devsite-lab\.invalid/);
-assert.ok(sessionFinal.result.baseline.controls.length >= 5);
+assert.equal(sessionFinal.result.baseline.recoveredSigningKeyUsed, true);
+assert.equal(sessionFinal.result.baseline.forgedCookieAccepted, true);
+assert.equal(sessionFinal.result.baseline.callableInvoked, true);
+assert.equal(sessionFinal.result.baseline.rcePrimitive, true);
+assert.equal(sessionFinal.result.baseline.proofType, 'bounded_python_callable_dispatch');
+assert.equal(sessionFinal.result.baseline.safetyProfile, 'server_owned_time_sleep_50ms');
+assert.equal(sessionFinal.attackFlow.classification, 'RCE primitive CONFIRMED');
+assert.equal(sessionFinal.attackFlow.steps.at(-1).status, 'CONFIRMED');
+assert.ok(sessionFinal.result.baseline.controls.length >= 7);
+const wrongKeyControl = sessionFinal.result.baseline.controls.find(({ id }) => id === 'wrong_key_signature');
+assert.equal(wrongKeyControl?.passed, true);
+assert.equal(wrongKeyControl?.reason, 'invalid_session');
+assert.match(sessionFinal.result.baseline.trace.join('\n'), /separate attacker serializer/);
+assert.match(sessionFinal.result.baseline.trace.join('\n'), /accepted by vulnerable server serializer/);
 assert.ok(sessionFinal.result.baseline.timingMs >= 35 && sessionFinal.result.baseline.timingMs <= 2_000);
 const proxyFinal = finalStates.get(players[0].token);
 assert.match(proxyFinal.result.baseline.rawHttp, /%2e%2e/);

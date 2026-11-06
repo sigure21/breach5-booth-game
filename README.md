@@ -29,14 +29,19 @@ percent decode / dot-segment 정규화
 → zlib / Base64URL / TaggedJSON decode
 → pickled OAuth flow의 client_secret 관찰
 → OAuth secret과 session signing key의 역할 재사용
-→ state와 flow key가 일치하는 세션 위조
+→ 회수 secret만 사용한 별도 공격자 signer로 세션 위조
+→ 취약 서버 signer가 위조 쿠키를 검증
+→ state와 flow key가 일치하는 flow lookup
 → callback의 unsafe pickle load
-→ bounded timing proof
+→ STACK_GLOBAL/REDUCE가 Python callable과 인자를 결정
+→ 실제 bounded callable 실행으로 RCE primitive 확인
 ```
 
 `$90,000`은 해당 연구자가 write-up에서 설명한 `$75,000 × 1.2` 보상 주장입니다. 이 저장소가 독립적으로 보상액을 검증했다는 뜻이 아니며, 이 사례를 CVE로 표기하지 않습니다. 게임은 `devsite-lab.invalid`라는 가상 호스트만 표시하고 실제 Google 호스트에 요청하지 않습니다.
 
 Evidence Deck의 쿠키·TaggedJSON·pickletools 출력은 참가자가 직접 디코딩할 수 있는 완전한 공개 demo fixture입니다. 여기에 표시된 demo credential은 런타임 secret이 아닙니다. 실제 판정 엔진은 매 기동 시 별도로 생성된 lab secret으로 같은 구조를 다시 만들며, 그 값과 forged cookie bytes는 공개 API에 반환하지 않습니다.
+
+판정 엔진은 쿠키에서 정적으로 회수한 secret만 넣은 별도 공격자 signer로 forged session을 만들고, 취약 서버 signer가 이를 실제 수락한 뒤 callback의 `pickle.loads()`까지 연결합니다. 이어 서버 소유 `time.sleep(0.05)` callable이 실제 호출되고, no-cookie·변조 서명·wrong-key·wrong-state·missing-flow·정상 flow 대조군까지 모두 일치해야만 `RCE primitive CONFIRMED`를 반환합니다. 원 사건에서는 이 pickle 위치가 원격 세션의 제어를 받았지만, 이 lab은 같은 sink에 서버 소유 safe payload만 대입해 primitive를 검증합니다. OS 명령·파일·subprocess·socket은 실행하지 않습니다.
 
 ## 난이도
 
@@ -109,7 +114,7 @@ npm run verify
 - reconnect 고정, global capacity, late join, 1인 `FULL_STACK`, 2인 이상 팀 분배
 - evidence 기반 allowlist 선택과 phase-bound action
 - Proxy Panic 원본·backtick·정상 bootstrap 회귀
-- Session Heist 서명·state·flow·bounded timing 음성 대조와 완전 패치 회귀
+- Session Heist 서명·state·flow·실제 bounded callable·RCE primitive 판정과 완전 패치 회귀
 - 브라우저·공개 API·컨테이너 로그의 runtime secret 비노출
 - 내부 네트워크, 비권한 사용자, read-only filesystem 등 Compose 격리
 - 검증 프로젝트·네트워크·이미지의 scoped cleanup
@@ -163,7 +168,7 @@ QR과 관전자 화면은 모두 `PUBLIC_BASE_URL`에서 `/play` 주소를 만�
 
 - 외부에 publish되는 서비스는 coordinator 하나뿐입니다.
 - Proxy와 Session 엔진은 서로 분리된 internal Docker network에 있습니다.
-- Session 엔진은 서버가 만든 lab cookie와 pickle만 처리하고, 50ms로 제한된 로컬 timing probe만 실행합니다.
+- Session 엔진은 서버가 만든 lab cookie와 pickle만 처리하고, 50ms로 제한된 로컬 callable proof만 실행합니다.
 - Session 엔진은 실제 OAuth 교환, 외부 callback, shell, 파일 읽기, 외부 네트워크를 사용하지 않습니다.
 - OAuth 역할의 lab secret, patched signing secret, engine token, proof marker는 독립 생성됩니다.
 - 공개 API에는 secret 값이 아니라 boolean 판정과 정제된 trace만 반환됩니다.

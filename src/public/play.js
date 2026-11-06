@@ -403,6 +403,32 @@ function previewPanel(current, task, pending) {
   return section;
 }
 
+function attackFlowPanel(current) {
+  const flow = current.attackFlow;
+  if (!flow || !Array.isArray(flow.steps) || flow.steps.length === 0) return null;
+  const section = element('section', `attack-flow${flow.confirmed ? ' confirmed' : ''}`);
+  section.setAttribute('aria-label', flow.title ?? 'RCE FLOW');
+  const heading = element('div', 'attack-flow-head');
+  heading.append(
+    element('h3', '', flow.title ?? 'RCE FLOW'),
+    element('strong', '', flow.classification ?? 'CHAIN IN PROGRESS'),
+  );
+  const list = element('ol', 'attack-flow-list');
+  for (const step of flow.steps) {
+    const status = String(step.status ?? 'PENDING').toUpperCase();
+    const item = element('li', `attack-flow-step status-${status.toLowerCase()}`);
+    item.append(
+      element('b', '', step.label ?? step.id),
+      element('span', '', status),
+      element('p', '', step.detail ?? ''),
+    );
+    list.append(item);
+  }
+  section.append(heading, list);
+  if (flow.safetyNote) section.append(element('p', 'attack-flow-safety', flow.safetyNote));
+  return section;
+}
+
 function observationRecap(tasks) {
   const completed = tasks.filter((task) => task.selected && task.selectedObservation);
   if (completed.length === 0) return null;
@@ -447,6 +473,8 @@ function tasksPanel(current) {
       element('h2', '', '필수 판단을 모두 제출했습니다.'),
       element('p', '', '팀의 남은 응답이 모이면 즉시 다음 단계로 이동합니다. 타이머는 최대 제한입니다.'),
     );
+    const attackFlow = attackFlowPanel(current);
+    if (attackFlow) card.append(attackFlow);
     const recap = observationHistory(current.observations);
     if (recap) card.append(recap);
     if (current.labPreview) card.append(previewPanel(current, { options: [] }, null));
@@ -460,8 +488,10 @@ function tasksPanel(current) {
     element('div', 'eyebrow', `${PHASE_LABELS[current.round.phase]} · ${completed + 1}/${current.tasks.length}`),
     element('h2', '', pendingTask.prompt),
     element('p', 'criterion', pendingTask.criterion ?? '공개된 증거와 일치하는 기술 판단을 선택하세요.'),
-    evidenceDeck(pendingTask),
   );
+  const attackFlow = attackFlowPanel(current);
+  if (attackFlow) card.append(attackFlow);
+  card.append(evidenceDeck(pendingTask));
   const recap = observationHistory(current.observations);
   if (recap) card.append(recap);
 
@@ -523,6 +553,8 @@ function passivePanel(current) {
     pulse.append(element('i'), element('span', '', phase === 'EXECUTE' || phase === 'REVERIFY' ? 'ISOLATED ENGINE RUNNING' : 'WAITING FOR REQUIRED RESPONSES'));
     card.append(pulse);
   }
+  const attackFlow = attackFlowPanel(current);
+  if (attackFlow) card.append(attackFlow);
   if (current.labPreview) card.append(previewPanel(current, { options: [] }, null));
   const history = observationHistory(current.observations);
   if (history) card.append(history);
@@ -571,6 +603,8 @@ function resultPanel(current) {
     element('div', 'score blue-score', `BLUE ${result.blueScore ?? 0}/${result.bluePossible ?? '?'}`),
   );
   card.append(score);
+  const attackFlow = attackFlowPanel(current);
+  if (attackFlow) card.append(attackFlow);
   const history = observationHistory(current.observations);
   if (history) card.append(history);
 
@@ -630,6 +664,7 @@ function stateKey(current) {
     player: current.player,
     tasks: current.tasks,
     observations: current.observations,
+    attackFlow: current.attackFlow,
     labPreview: current.labPreview,
     result: current.result,
   });
