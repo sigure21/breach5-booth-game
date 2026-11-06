@@ -229,11 +229,11 @@ a { color: inherit; }
   .screen-grid { grid-template-columns: 1fr; }
   .screen-clock-label { display: none; }
   .join-panel { min-height: 28rem; }
-  .screen-header { min-width: 0; gap: .5rem; }
+  .screen-header { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .5rem; }
   .screen-header > div:first-child { min-width: 0; }
-  .screen-wordmark { overflow-wrap: anywhere; }
-  .screen-clock { min-width: 0; flex: 0 1 auto; gap: .35rem; }
-  .screen-clock strong { min-width: 0; white-space: nowrap; font-size: clamp(1.5rem, 7.5vw, 3rem); letter-spacing: -.1em; }
+  .screen-wordmark { overflow-wrap: anywhere; font-size: clamp(2rem, 10vw, 2.5rem); }
+  .screen-clock { min-width: 0; flex: 0 0 auto; gap: .35rem; }
+  .screen-clock strong { min-width: 5ch; white-space: nowrap; font-size: clamp(1.35rem, 7vw, 2.5rem); letter-spacing: -.08em; }
   .screen-footer { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .45rem; }
   .stat { min-width: 0; flex-direction: column; align-items: center; justify-content: center; gap: .2rem; padding: .55rem .4rem; text-align: center; }
   .stat span, .stat strong { max-width: 100%; overflow-wrap: anywhere; }
