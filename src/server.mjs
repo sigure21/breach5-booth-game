@@ -2,8 +2,13 @@ import { readFile } from 'node:fs/promises';
 import http from 'node:http';
 import { fileURLToPath } from 'node:url';
 import QRCode from 'qrcode';
-import { ProxyPanicAdjudicator } from './adjudicator.mjs';
+import {
+  AdjudicatorRegistry,
+  ProxyPanicAdjudicator,
+  SessionHeistAdjudicator,
+} from './adjudicator.mjs';
 import { GameStore } from './game.mjs';
+import { DIFFICULTIES, publicCatalog } from './scenarios/index.mjs';
 
 const ROOT = fileURLToPath(new URL('../', import.meta.url));
 const PUBLIC_ROOT = fileURLToPath(new URL('./public/', import.meta.url));
@@ -64,6 +69,8 @@ function statusFor(error) {
     choice_locked: 409,
     wrong_round: 409,
     invalid_choice: 400,
+    invalid_scenario: 400,
+    invalid_difficulty: 400,
     invalid_action_id: 400,
     invalid_json: 400,
     too_large: 413,
@@ -136,11 +143,14 @@ export async function createGameServer({
         });
         return send(res, 200, 'image/svg+xml; charset=utf-8', svg, { 'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'" });
       }
+      if (req.method === 'GET' && url.pathname === '/api/catalog') {
+        return sendJson(res, 200, { scenarios: publicCatalog(), difficulties: DIFFICULTIES });
+      }
       if (req.method === 'POST' && url.pathname === '/api/join') {
         if (!joinAllowed()) return sendJson(res, 429, { error: 'join_rate_limited' });
         const body = await jsonBody(req);
         if (!/^[a-f0-9]{32}$/.test(body.deviceId ?? '')) return sendJson(res, 400, { error: 'invalid_device_id' });
-        const identity = store.join(bearer(req), body.deviceId);
+        const identity = store.join(bearer(req), body.deviceId, body.scenarioId, body.difficulty);
         return sendJson(res, 201, identity);
       }
       if (req.method === 'GET' && url.pathname === '/api/state') {
@@ -149,6 +159,11 @@ export async function createGameServer({
       if (req.method === 'POST' && url.pathname === '/api/action') {
         const body = await jsonBody(req);
         const result = store.submit(bearer(req), body);
+        return sendJson(res, 200, result);
+      }
+      if (req.method === 'POST' && url.pathname === '/api/preview') {
+        const body = await jsonBody(req);
+        const result = store.preview(bearer(req), body);
         return sendJson(res, 200, result);
       }
       if (req.method === 'GET' && url.pathname === '/api/screen-state') {
@@ -171,11 +186,14 @@ export async function createGameServer({
 async function main() {
   const port = boundedInteger(process.env.PORT, 3000, 1, 65_535);
   const host = process.env.HOST ?? '0.0.0.0';
-  const roundMs = boundedInteger(process.env.ROUND_DURATION_MS, 300_000, 3_000, 300_000);
-  const maxPlayers = boundedInteger(process.env.MAX_PLAYERS, 16, 2, 16);
+  const roundMs = boundedInteger(process.env.ROUND_DURATION_MS, 180_000, 3_000, 180_000);
+  const maxPlayers = boundedInteger(process.env.MAX_PLAYERS, 16, 1, 16);
   const publicBaseUrl = process.env.PUBLIC_BASE_URL ?? `http://127.0.0.1:${port}`;
-  const adjudicator = new ProxyPanicAdjudicator();
-  const store = new GameStore({ adjudicator, roundMs, maxPlayers, epochMs: Date.now() });
+  const adjudicator = new AdjudicatorRegistry(new Map([
+    ['proxy-panic', new ProxyPanicAdjudicator()],
+    ['session-heist', new SessionHeistAdjudicator()],
+  ]));
+  const store = new GameStore({ adjudicators: adjudicator, roundMs, maxPlayers, epochMs: Date.now() });
   const server = await createGameServer({ store, adjudicator, publicBaseUrl });
   const ticker = setInterval(() => {
     store.tick().catch((error) => console.error(`round tick failed: ${error.message}`));

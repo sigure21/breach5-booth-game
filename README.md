@@ -1,29 +1,81 @@
 # BREACH//5
 
-**5분 안에 뚫거나 막아라.**
+**최대 3분 안에 증거를 읽고, 요청을 조립하고, 패치를 검증하라.**
 
-`BREACH//5`는 플래그 제출형 CTF가 아니라 OWASP Korea 2026 부스용으로 설계한 모바일 RED vs BLUE 보안 게임입니다. 참가자는 QR로 입장해 실제 HTTP 요청을 카드로 조립하고, 대형 화면에서는 격리된 취약 서버와 패치 서버의 판정이 실시간으로 진행됩니다.
+`BREACH//5`는 플래그 문자열을 찾는 CTF가 아니라 OWASP Korea 2026 부스용 모바일 RED vs BLUE 보안 게임입니다. 참가자는 QR로 입장한 뒤 사건과 난이도를 직접 고르고, Raw HTTP·로그·코드·diff를 근거로 allowlist 카드만 조합합니다. 서버는 선택을 격리된 교육용 엔진에 전달하고, 원본 공격·변형 공격·정상 요청의 실제 회귀 결과를 보여줍니다.
 
-현재 MVP에는 첫 번째 시나리오 **두 명의 경비원**만 구현되어 있습니다. 이 시나리오는 raw request-target과 canonical route의 해석 차이가 cold-start shell sink까지 이어지는 교육용 축소 모델입니다. 실제 제품 코드는 포함하지 않습니다.
+## 시나리오
 
-## 지금 구현된 범위
+### 1. Proxy Panic — 두 명의 경비원
 
-- 서버 프로세스가 시작되면 JOIN부터 진행되는 정확한 300초 라운드
-- 기동 시점을 기준으로 매 5분 자동 라운드 교체
-- 익명 RED/BLUE 자동 배정과 6개 역할
-- 브라우저에만 저장되는 익명 장치 ID를 이용한 새로고침·중복 탭 재접속
-- 20초 JOIN 모집 구간이 끝나면 참가자를 다음 판으로 자동 배치하고 시작 시각·인원·완결형 연습 미션 제공
-- 모바일 세로 화면, 한 손 조작, 키보드 입력 불필요
-- 대형 관전자 화면과 QR 코드
-- allowlist 카드 조합을 실제 raw HTTP request-target으로 변환
-- 내부 취약 엔진에서 safe proof 실행
-- 별도 패치 엔진에서 원본 및 변형 공격 재검증
-- 취약·패치 엔진 외부 미노출
-- 런타임 proof/token 자동 생성 및 Git 제외
-- 한 명부터 16명까지 동작하는 deterministic fallback
-- 단위·API·Docker live-contract·로그 비밀값 감사를 포함한 one-command 검증
+Gateway가 검사한 canonical path와 Worker가 실행에 사용한 raw path가 다른 상황을 추적합니다.
 
-GraphQL, AI 모델 로더, Flask cookie/pickle, Grafana/token pivot 라운드는 아직 구현되지 않았습니다.
+```text
+percent decode / dot-segment 정규화
+→ Gateway allowlist 통과
+→ Worker가 raw prefix 재사용
+→ shell command substitution
+→ 격리된 safe proof
+```
+
+참가자는 Gateway·Worker 로그에서 parser differential을 찾고, 실제 request-target을 조립한 뒤 문자열 blacklist와 근본 패치를 원본·backtick 변형·정상 bootstrap으로 비교합니다. 이 시나리오는 교육용으로 새로 구성한 모델이며 특정 제품 취약점의 재현을 주장하지 않습니다.
+
+### 2. Session Heist — `$90K` 사례
+
+[Simon Koeck의 공개 write-up](https://simonkoeck.com/writeups/google-devsite-flask-session-pickle-rce)을 바탕으로 다음 trust chain을 축소 모델링합니다.
+
+```text
+읽을 수 있는 signed Flask session
+→ zlib / Base64URL / TaggedJSON decode
+→ pickled OAuth flow의 client_secret 관찰
+→ OAuth secret과 session signing key의 역할 재사용
+→ state와 flow key가 일치하는 세션 위조
+→ callback의 unsafe pickle load
+→ bounded timing proof
+```
+
+`$90,000`은 해당 연구자가 write-up에서 설명한 `$75,000 × 1.2` 보상 주장입니다. 이 저장소가 독립적으로 보상액을 검증했다는 뜻이 아니며, 이 사례를 CVE로 표기하지 않습니다. 게임은 `devsite-lab.invalid`라는 가상 호스트만 표시하고 실제 Google 호스트에 요청하지 않습니다.
+
+Evidence Deck의 쿠키·TaggedJSON·pickletools 출력은 참가자가 직접 디코딩할 수 있는 완전한 공개 demo fixture입니다. 여기에 표시된 demo credential은 런타임 secret이 아닙니다. 실제 판정 엔진은 매 기동 시 별도로 생성된 lab secret으로 같은 구조를 다시 만들며, 그 값과 forged cookie bytes는 공개 API에 반환하지 않습니다.
+
+## 난이도
+
+입장 전에 시나리오와 난이도를 모두 선택해야 합니다.
+
+| 구분 | 초급 · Guided | 고급 · Analyst |
+|---|---|---|
+| 증거 | 중요한 줄의 짧은 주석 제공 | 원문 artifact 중심 |
+| 요청 조립 | 선택지의 기술적 의미와 영향 설명 | 리터럴 token·Raw HTTP 중심 |
+| 실패 근거 | 어떤 증거와 모순되는지 설명 | 정제된 엔진 결과 중심 |
+| 패치 | diff와 보안 효과를 함께 표시 | diff와 회귀 행렬 중심 |
+| 판정 | 실제 시나리오 엔진 | 초급과 동일한 엔진·정답 |
+
+난이도에 따라 취약점, 정답 ID, 엔진 판정이 달라지지 않습니다. 초급은 근거를 더 설명하고 고급은 같은 증거를 덜 해설할 뿐입니다.
+
+## 플레이 규칙
+
+- 첫 15초 `JOIN` 구간에서만 현재 판에 들어갈 수 있습니다.
+- `JOIN` 종료 뒤 스캔한 참가자는 선택한 시나리오의 다음 판에 배치됩니다. 증거를 건너뛰는 중간 난입은 없습니다.
+- 한 명만 참가하면 `FULL_STACK` 모드로 RED 공격과 BLUE 패치를 모두 수행합니다. 부재한 팀의 숨은 기본 선택은 사용하지 않습니다.
+- 두 명 이상이면 RED/BLUE로 균형 배정하고, 각 기술 과제를 팀원에게 한 번씩 분배합니다.
+- 필수 응답이 끝나고 최소 노출 시간이 지나면 즉시 다음 단계로 이동합니다. 아래 시간은 기다려야 하는 시간이 아니라 단계별 최대 제한입니다.
+- 미응답 과제는 자동 정답이나 임의 선택으로 대체하지 않고 `incomplete_submission`으로 판정합니다.
+- 브라우저는 raw path, cookie, pickle, 명령을 직접 제출할 수 없습니다. 서버가 검증한 semantic choice ID만 받습니다.
+
+## 최대 180초 흐름
+
+| 최대 구간 | Phase | 참가자 활동 |
+|---:|---|---|
+| 0:00–0:15 | JOIN | 시나리오·난이도 선택, 익명 입장 |
+| 0:15–0:23 | BRIEF | 사건과 목표 확인 |
+| 0:23–0:48 | DISCOVER | 독립 증거에서 trust boundary 식별 |
+| 0:48–1:28 | BUILD | 실제 요청·session chain과 1차 control 조립 |
+| 1:28–1:43 | EXECUTE | 취약 엔진 판정과 음성 대조 확인 |
+| 1:43–2:18 | DUEL | 변형 공격과 실제 patch diff 선택 |
+| 2:18–2:43 | REVERIFY | 원본·variant·normal 회귀 검증 |
+| 2:43–3:00 | RESULT | 원인, 증거, 차단 결과 정리 |
+
+빠르게 근거를 찾은 참가자는 최대 시간을 모두 기다리지 않습니다. 다음 판의 전역 경계는 서버 기동 시점부터 180초 간격으로 유지하므로 late join 배치는 예측 가능합니다. 상세 계약은 [3분 상호작용 문서](docs/THREE_MINUTE_FLOW.md)를 참고하세요.
 
 ## 빠른 실행
 
@@ -38,22 +90,12 @@ npm ci
 npm run up
 ```
 
-실행 주소:
+기본 주소:
 
 - 참가자: `http://127.0.0.1:18090/play`
-- 대형 화면: `http://127.0.0.1:18090/screen`
+- 관전자 화면: `http://127.0.0.1:18090/screen`
 
-`npm run up`은 다음 작업을 자동 수행합니다.
-
-1. 오프라인 테스트 실행
-2. `.runtime/booth.env`에 proof와 내부 토큰 생성
-3. Compose 구성 검증
-4. 이미지 빌드 및 서비스 시작
-5. 취약·패치 엔진 health/readiness 확인
-
-서버가 정상 기동된 순간이 첫 라운드의 `0:00 JOIN`입니다. 라운드는 벽시계의 `:00`·`:05`에 맞추지 않고 그 기동 시점부터 5분 주기로 이어집니다.
-
-`5분`은 한 팀 라운드의 길이입니다. 증거와 역할 맥락을 보존하기 위해 `0:20` 이후 중간 참가는 허용하지 않습니다. 늦게 스캔한 방문자는 즉시 3단계 연습 사건과 해설을 완료한 뒤 다음 판에 자동 합류하므로, 전체 팀 라운드까지 기다리는 체류 시간은 다음 시작까지의 대기 시간이 추가될 수 있습니다. 대형 화면은 현재/다음 판 모집 상태와 시작 카운트다운을 표시합니다.
+`npm run up`은 정적·단위 검사를 실행하고, `.runtime/booth.env`에 서로 독립적인 내부 토큰과 lab secret을 생성한 뒤 Compose 스택을 기동합니다. 첫 판은 coordinator가 시작될 때 `JOIN`으로 시작합니다.
 
 ## 전체 검증
 
@@ -61,50 +103,36 @@ npm run up
 npm run verify
 ```
 
-검증은 별도 Compose 프로젝트와 30초 가속 라운드를 사용합니다.
+이 명령은 별도 Compose 프로젝트와 가속 라운드를 사용해 다음 계약을 검사하도록 구성되어 있습니다.
 
-- 300초 상태머신 경계 단위 테스트
-- 팀 균형, 역할, late join, 중복 행동, reconnect
-- 참가자 API와 QR 생성
-- Docker 격리 및 Compose 구성
-- 실제 raw/canonical 공격의 safe proof 도달
-- 원본 및 backtick 변형에 대한 패치 회귀 검증
-- 6인 RED/BLUE 전체 라운드
-- API 및 컨테이너 로그의 proof/token 비노출
-- 검증 프로젝트 자동 종료 및 네트워크 정리
+- 두 시나리오 catalog와 초급/고급 입장 계약
+- reconnect 고정, global capacity, late join, 1인 `FULL_STACK`, 2인 이상 팀 분배
+- evidence 기반 allowlist 선택과 phase-bound action
+- Proxy Panic 원본·backtick·정상 bootstrap 회귀
+- Session Heist 서명·state·flow·bounded timing 음성 대조와 완전 패치 회귀
+- 브라우저·공개 API·컨테이너 로그의 runtime secret 비노출
+- 내부 네트워크, 비권한 사용자, read-only filesystem 등 Compose 격리
+- 검증 프로젝트·네트워크·이미지의 scoped cleanup
+
+검증 명령이 특정 환경에서 실제로 통과했는지는 그 실행 결과를 확인해야 합니다. 문서만으로 현재 Docker 또는 행사장 네트워크 상태를 보증하지 않습니다.
 
 ## 운영 명령
 
 | 명령 | 기능 |
 |---|---|
-| `npm run up` | 테스트 후 5분 운영 스택 시작 |
-| `npm run verify` | 가속된 전체 live contract 실행 후 정리 |
+| `npm run up` | 검사 후 최대 3분 운영 스택 시작 |
+| `npm run verify` | 가속된 Docker live contract 실행 후 scoped cleanup |
 | `npm run status` | 운영 컨테이너 상태 확인 |
 | `npm run logs` | 최근 운영 로그 확인 |
 | `npm run down` | 이 저장소의 운영 Compose 스택만 종료 |
-| `npm run reset` | 운영 스택과 런타임 비밀값 재생성 |
-| `npm run doctor` | Node, Docker, Compose 및 구성 검사 |
+| `npm run reset` | 운영 스택 종료 후 runtime 비밀값 재생성 |
+| `npm run doctor` | Node, Docker, Compose 및 구성 확인 |
 
-`down`과 `verify`의 정리는 지정된 Compose 프로젝트에만 한정됩니다. 각 `verify`는 고유 Compose 프로젝트·이미지·원자적으로 생성된 환경 파일, 검증 전용 loopback 프록시, Docker가 배정한 임의 backend 포트를 사용하므로 동시 검증도 서로를 건드리지 않습니다. 별도 heartbeat가 장시간 빌드 중인 활성 manifest를 계속 갱신합니다. 종료된 PID의 manifest는 다음 실행이 즉시, PID가 재사용된 경우에도 heartbeat가 끊긴 manifest는 60초 후 정확한 프로젝트명으로 scoped cleanup합니다.
-
-## 5분 라운드
-
-| 시간 | Phase | RED | BLUE |
-|---:|---|---|---|
-| 0:00–0:20 | JOIN | QR 입장·역할 배정 | QR 입장·역할 배정 |
-| 0:20–0:50 | BRIEF | 사건 단서 수신 | 로그·구조 단서 수신 |
-| 0:50–1:35 | DISCOVER | 신뢰 오류 발견 | 이상 징후 발견 |
-| 1:35–2:35 | BUILD | 요청 카드 조립 | 1차 차단 경계 선택 |
-| 2:35–3:05 | EXECUTE | 취약 서버 실전 판정 | 침투 결과 확인 |
-| 3:05–4:05 | DUEL | 변형 요청 선택 | 근본 패치 선택 |
-| 4:05–4:35 | REVERIFY | 변형 공격 재전송 | 패치 회귀 검증 |
-| 4:35–5:00 | RESULT | 원인·Raw HTTP 확인 | 원인·통제 확인 |
+`down`과 `verify`는 지정된 Compose 프로젝트만 정리하며 broad Docker prune을 실행하지 않습니다.
 
 ## 실제 휴대폰 연결
 
-기본값은 안전을 위해 `127.0.0.1`에만 바인딩됩니다. 이 상태에서는 다른 휴대폰이 QR 주소에 접근할 수 없습니다.
-
-검증된 내부망에서 시험할 경우 `.runtime/booth.env`의 비밀값은 그대로 두고 다음 비밀값이 아닌 설정만 변경할 수 있습니다.
+기본값은 `127.0.0.1` 바인딩이므로 다른 휴대폰에서 접근할 수 없습니다. 검증된 참가자망에서 시험할 때는 `.runtime/booth.env`의 secret을 그대로 두고 다음 비밀값이 아닌 설정만 변경합니다.
 
 ```dotenv
 BREACH5_BIND=0.0.0.0
@@ -112,45 +140,44 @@ BREACH5_PORT=18090
 PUBLIC_BASE_URL=http://192.0.2.10:18090
 ```
 
-`192.0.2.10`은 문서용 예시 주소이므로 실제 PC의 검증된 주소로 바꿔야 합니다. 변경 후 `npm run reset`이 아니라 다음처럼 기존 비밀값을 유지한 채 스택만 다시 시작합니다.
+`192.0.2.10`은 문서용 예시 주소입니다. 실제 PC의 검증된 주소로 바꾼 뒤 기존 secret을 유지한 채 스택을 다시 시작합니다.
 
 ```bash
 npm run down
 npm run up
 ```
 
-실제 행사에서는 공용 Wi-Fi만 가정하지 말고 유효한 HTTPS 주소 또는 행사장 정책에 맞는 전용 AP를 사전에 검증해야 합니다. 네트워크 정책을 확인하기 전에는 현장 모바일 접속 가능성을 확정할 수 없습니다.
-
-QR과 대형 화면의 주소는 모두 `PUBLIC_BASE_URL`을 기준으로 생성됩니다. 이 값은 참가자의 휴대폰에서 실제로 접근 가능한 coordinator 주소여야 하며, 경로는 자동으로 `/play`가 사용됩니다. 공용 인터넷에 직접 노출하지 말고, 참가자망에서만 접근 가능한 방화벽 또는 검토된 HTTPS ingress를 사용하세요. 행사장 ingress에는 연결·요청 속도 제한을 별도로 두는 것을 권장합니다.
+QR과 관전자 화면은 모두 `PUBLIC_BASE_URL`에서 `/play` 주소를 만듭니다. 실제 행사에서는 검토된 HTTPS ingress 또는 참가자 전용 네트워크를 사용하고, AP·방화벽·reverse proxy 정책을 사전에 확인해야 합니다. 네트워크 실측 전에는 모바일 접근성과 회전율을 확정할 수 없습니다.
 
 ## 구조
 
 ```text
 휴대폰 /play ─┐
-대형화면 /screen ──> game coordinator
-                         ├─> vulnerable gateway ─> vulnerable worker
-                         └─> patched gateway ────> patched worker
+관전자 /screen ──> game coordinator
+                      ├─ proxy-panic adjudicator
+                      │    ├─ vulnerable gateway ─> vulnerable worker
+                      │    └─ patched gateway ────> patched worker
+                      └─ session-heist adjudicator
+                           └─ internal Python session engine
 ```
 
-- 외부에 노출되는 것은 coordinator 하나뿐입니다.
-- 모바일은 raw path나 shell 문자열을 제출할 수 없습니다.
-- coordinator가 allowlist 카드 ID를 정해진 raw request-target으로 변환합니다.
-- worker는 외부 네트워크, host mount, Docker socket을 받지 않습니다.
-- 브라우저에는 proof 값이 아니라 boolean 판정과 정제된 trace만 반환됩니다.
+- 외부에 publish되는 서비스는 coordinator 하나뿐입니다.
+- Proxy와 Session 엔진은 서로 분리된 internal Docker network에 있습니다.
+- Session 엔진은 서버가 만든 lab cookie와 pickle만 처리하고, 50ms로 제한된 로컬 timing probe만 실행합니다.
+- Session 엔진은 실제 OAuth 교환, 외부 callback, shell, 파일 읽기, 외부 네트워크를 사용하지 않습니다.
+- OAuth 역할의 lab secret, patched signing secret, engine token, proof marker는 독립 생성됩니다.
+- 공개 API에는 secret 값이 아니라 boolean 판정과 정제된 trace만 반환됩니다.
+
+구체적인 위협 경계와 잔여 위험은 [SECURITY.md](SECURITY.md)를 참고하세요.
 
 ## 익명 참가와 한계
 
-- 브라우저는 임의의 128-bit 장치 ID를 생성해 `localStorage`에 보관합니다. 서버는 같은 ID의 중복 탭이나 새로고침을 같은 참가자로 재연결합니다.
-- bearer 참가 토큰은 `sessionStorage`에만 보관되며 이름, 이메일, 계정 입력은 받지 않습니다.
-- 장치 ID는 인증 수단이나 강한 개인 식별자가 아닙니다. 저장소 삭제나 새 브라우저 프로필로 새 ID를 만들 수 있습니다.
-- coordinator의 짧은 join 속도 제한과 라운드 정원은 우발적인 중복을 줄이지만, 악의적인 참가자가 여러 장치 ID를 만들어 현재 판과 다음 판의 슬롯을 소진하는 것을 완전히 막지는 못합니다.
-
-따라서 공용 인스턴스에서는 신뢰된 행사장 네트워크, ingress 단위 속도 제한, 현장 모니터링을 함께 사용해야 합니다. 자세한 잔여 위험은 [SECURITY.md](SECURITY.md)를 참고하세요.
-
-## 사실 범위
-
-이 저장소는 `ctf-proxy-panic`에서 사용한 신뢰 경계 모델을 부스 게임용으로 새로 구성한 교육용 코드입니다. 실제 Collabora 또는 Nextcloud 제품 코드를 포함하지 않으며, 실제 제품 배포를 재현한다고 주장하지 않습니다. 관련 출처를 설명할 때는 각 advisory의 정확한 범위와 확인 날짜를 별도로 검증해야 합니다.
+- 브라우저는 임의의 128-bit device ID를 `localStorage`에 보관하고, 참가 bearer token은 `sessionStorage`에만 보관합니다.
+- 같은 device의 새로고침·중복 탭은 최초 시나리오와 난이도를 유지한 채 같은 참가자로 재연결됩니다.
+- device ID는 인증 수단이나 강한 개인 식별자가 아닙니다. 저장소 삭제나 새 브라우저 프로필로 새 ID를 만들 수 있습니다.
+- 애플리케이션 join 제한과 정원은 우발적 중복을 줄이지만 악의적 multi-ID 소진을 막는 Sybil 방어가 아닙니다.
+- reverse proxy, CDN, Docker 또는 호스팅 환경은 별도 access log를 남길 수 있으므로 실제 운영 설정을 감사해야 합니다.
 
 ## 라이선스
 
-MIT. 파생 설계와 npm 의존성 고지는 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)를 참고하세요.
+MIT. npm 의존성과 Proxy Panic 설계 계보 고지는 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)를 참고하세요. Python package license는 설치된 package metadata와 각 upstream 고지를 별도로 확인해야 합니다.

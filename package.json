@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "A five-minute mobile RED vs BLUE booth game backed by an isolated raw/canonical path-confusion lab.",
+  "description": "A three-minute mobile security booth game with evidence-driven proxy and signed-session labs.",
   "license": "MIT",
   "engines": {
     "node": ">=22"

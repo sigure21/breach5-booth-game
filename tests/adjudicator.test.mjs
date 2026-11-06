@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import test from 'node:test';
-import { ProxyPanicAdjudicator } from '../src/adjudicator.mjs';
+import {
+  createDeterministicRegistry,
+  DeterministicAdjudicator,
+  DeterministicSessionAdjudicator,
+  ProxyPanicAdjudicator,
+} from '../src/adjudicator.mjs';
 
 async function mockEngine(status, body) {
   const server = http.createServer((request, response) => {
@@ -51,4 +56,51 @@ test('malformed worker verdicts are rejected instead of coerced to attack failur
   await assert.rejects(adjudicator.runBaseline({
     prefix: 'command_substitution', normalization: 'encoded_parent', sink: 'cold_start',
   }), /invalid engine verdict/);
+});
+
+test('proxy regression distinguishes a literal blacklist from both semantic fixes', async () => {
+  const adjudicator = new DeterministicAdjudicator();
+  const bypassed = await adjudicator.runPatch({ patch: 'block_subshell', bypass: 'backtick_variant' });
+  assert.equal(bypassed.original.proofReached, false);
+  assert.equal(bypassed.variant.proofReached, true);
+  assert.equal(bypassed.effective, false);
+
+  for (const patch of ['canonical_once', 'structured_exec']) {
+    const verdict = await adjudicator.runPatch({ patch, bypass: 'backtick_variant' });
+    assert.equal(verdict.original.proofReached, false);
+    assert.equal(verdict.variant.proofReached, false);
+    assert.equal(verdict.normal.bootstrapTriggered, true);
+    assert.equal(verdict.effective, true);
+  }
+});
+
+test('session-heist deterministic verdict requires the complete semantic chain', async () => {
+  const adjudicator = new DeterministicSessionAdjudicator();
+  const correct = await adjudicator.runBaseline({
+    surface: 'signed_not_encrypted', decode: 'base64_zlib_tagged_json',
+    secret: 'pickle_client_secret', forge: 'matching_state_flow', gadget: 'bounded_sleep_reduce',
+  });
+  assert.equal(correct.proofReached, true);
+  assert.match(correct.rawHttp, /devsite-lab\.invalid/);
+  assert.ok(correct.controls.every(({ passed }) => passed));
+
+  const wrong = await adjudicator.runBaseline({
+    surface: 'encrypted_cookie', decode: 'base64_zlib_tagged_json',
+    secret: 'pickle_client_secret', forge: 'matching_state_flow', gadget: 'bounded_sleep_reduce',
+  });
+  assert.equal(wrong.proofReached, false);
+
+  const partial = await adjudicator.runPatch({ patch: 'separate_secret_only', control: 'timing_and_negative_controls' });
+  const complete = await adjudicator.runPatch({ patch: 'server_side_json_bundle', control: 'timing_and_negative_controls' });
+  assert.equal(partial.effective, false);
+  assert.equal(partial.variant.proofReached, true);
+  assert.equal(complete.effective, true);
+  assert.equal(complete.normal.passed, true);
+});
+
+test('deterministic registry contains a separate adjudicator for each scenario', async () => {
+  const registry = createDeterministicRegistry();
+  assert.notEqual(registry.get('proxy-panic'), registry.get('session-heist'));
+  assert.equal(await registry.ready(), true);
+  assert.throws(() => registry.get('unknown'), /no adjudicator/);
 });

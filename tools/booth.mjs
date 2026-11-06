@@ -14,8 +14,10 @@ const defaultProject = 'breach5_booth';
 const VERIFY_HEARTBEAT_STALE_MS = 60_000;
 const ATOMIC_TEMP_STALE_MS = 60 * 60_000;
 const COMPOSE_OVERRIDE_KEYS = [
-  'ENGINE_TOKEN', 'WORKER_TOKEN', 'BREACH5_PROOF', 'ROUND_DURATION_MS', 'MAX_PLAYERS',
-  'BREACH5_BIND', 'BREACH5_PORT', 'BREACH5_IMAGE', 'PUBLIC_BASE_URL',
+  'ENGINE_TOKEN', 'WORKER_TOKEN', 'BREACH5_PROOF',
+  'SESSION_ENGINE_TOKEN', 'SESSION_LAB_CLIENT_SECRET', 'SESSION_SIGNING_SECRET', 'SESSION_PROOF',
+  'ROUND_DURATION_MS', 'MAX_PLAYERS',
+  'BREACH5_BIND', 'BREACH5_PORT', 'BREACH5_IMAGE', 'SESSION_ENGINE_IMAGE', 'PUBLIC_BASE_URL',
 ];
 const COMPOSE_OVERRIDE_SET = new Set(COMPOSE_OVERRIDE_KEYS);
 
@@ -128,11 +130,16 @@ async function createEnv(path, { port, roundMs, verifyProject = null, publicBase
     `ENGINE_TOKEN=${randomBytes(32).toString('hex')}`,
     `WORKER_TOKEN=${randomBytes(32).toString('hex')}`,
     `BREACH5_PROOF=proof_${randomBytes(24).toString('hex')}`,
+    `SESSION_ENGINE_TOKEN=${randomBytes(32).toString('hex')}`,
+    `SESSION_LAB_CLIENT_SECRET=${randomBytes(32).toString('hex')}`,
+    `SESSION_SIGNING_SECRET=${randomBytes(32).toString('hex')}`,
+    `SESSION_PROOF=session_proof_${randomBytes(24).toString('hex')}`,
     `ROUND_DURATION_MS=${roundMs}`,
     'MAX_PLAYERS=16',
     'BREACH5_BIND=127.0.0.1',
     `BREACH5_PORT=${port}`,
     `BREACH5_IMAGE=${verifyProject ? `breach5-booth-game:${verifyProject}` : 'breach5-booth-game:local'}`,
+    `SESSION_ENGINE_IMAGE=${verifyProject ? `breach5-session-engine:${verifyProject}` : 'breach5-session-engine:local'}`,
     `PUBLIC_BASE_URL=${publicBaseUrl ?? (port === 0 ? 'http://127.0.0.1' : `http://127.0.0.1:${port}`)}`,
     ...(verifyProject ? [
       `BREACH5_VERIFY_PROJECT=${verifyProject}`,
@@ -156,14 +163,54 @@ async function createEnv(path, { port, roundMs, verifyProject = null, publicBase
   return path;
 }
 
+async function upgradeLegacyBoothEnv() {
+  const current = await readFile(boothEnv, 'utf8');
+  const values = Object.fromEntries(current
+    .split(/\r?\n/)
+    .filter((line) => line && !line.startsWith('#') && line.includes('='))
+    .map((line) => line.split(/=(.*)/s).slice(0, 2)));
+  const additions = {
+    SESSION_ENGINE_TOKEN: randomBytes(32).toString('hex'),
+    SESSION_LAB_CLIENT_SECRET: randomBytes(32).toString('hex'),
+    SESSION_SIGNING_SECRET: randomBytes(32).toString('hex'),
+    SESSION_PROOF: `session_proof_${randomBytes(24).toString('hex')}`,
+    SESSION_ENGINE_IMAGE: 'breach5-session-engine:local',
+  };
+  const missing = Object.keys(additions).filter((key) => !values[key]);
+  const replaceLegacyDuration = values.ROUND_DURATION_MS === '300000';
+  if (missing.length === 0 && !replaceLegacyDuration) return;
+
+  const lines = current.replace(/\s*$/, '').split(/\r?\n/);
+  if (replaceLegacyDuration) {
+    const index = lines.findIndex((line) => line.startsWith('ROUND_DURATION_MS='));
+    if (index >= 0) lines[index] = 'ROUND_DURATION_MS=180000';
+  }
+  for (const key of missing) lines.push(`${key}=${additions[key]}`);
+  lines.push('');
+
+  const temporary = `${boothEnv}.${process.pid}.${randomBytes(6).toString('hex')}.upgrade`;
+  let handle = await open(temporary, 'wx', 0o600);
+  try {
+    await handle.writeFile(lines.join('\n'), 'utf8');
+    await handle.sync();
+    await handle.close();
+    handle = null;
+    await rename(temporary, boothEnv);
+  } finally {
+    if (handle) await handle.close().catch(() => {});
+    await rm(temporary, { force: true });
+  }
+}
+
 async function ensureBoothEnv() {
   if (!(await exists(boothEnv))) {
     try {
-      await createEnv(boothEnv, { port: 18090, roundMs: 300_000 });
+      await createEnv(boothEnv, { port: 18090, roundMs: 180_000 });
     } catch (error) {
       if (error?.code !== 'EEXIST' || !(await exists(boothEnv))) throw error;
     }
   }
+  await upgradeLegacyBoothEnv();
   return boothEnv;
 }
 
@@ -308,6 +355,7 @@ async function recoverStaleVerifications() {
     const createdAt = Number.parseInt(values.BREACH5_VERIFY_CREATED_AT ?? '', 10);
     if (values.BREACH5_VERIFY_PROJECT !== project
       || values.BREACH5_IMAGE !== `breach5-booth-game:${project}`
+      || values.SESSION_ENGINE_IMAGE !== `breach5-session-engine:${project}`
       || !Number.isInteger(ownerPid) || ownerPid < 1
       || !Number.isInteger(createdAt) || createdAt < 1) {
       console.warn(`Preserving untrusted stale verification manifest: ${path}`);
@@ -376,7 +424,8 @@ async function down() {
     console.log('BREACH//5 has no local runtime configuration.');
     return;
   }
-  run('docker', composeArgs(defaultProject, boothEnv, 'down', '--remove-orphans'));
+  const envFile = await ensureBoothEnv();
+  run('docker', composeArgs(defaultProject, envFile, 'down', '--remove-orphans'));
 }
 
 async function verify() {
@@ -419,12 +468,19 @@ async function verify() {
         AUDIT_ENGINE_TOKEN: secrets.ENGINE_TOKEN,
         AUDIT_WORKER_TOKEN: secrets.WORKER_TOKEN,
         AUDIT_BREACH5_PROOF: secrets.BREACH5_PROOF,
+        AUDIT_SESSION_ENGINE_TOKEN: secrets.SESSION_ENGINE_TOKEN,
+        AUDIT_SESSION_LAB_CLIENT_SECRET: secrets.SESSION_LAB_CLIENT_SECRET,
+        AUDIT_SESSION_SIGNING_SECRET: secrets.SESSION_SIGNING_SECRET,
+        AUDIT_SESSION_PROOF: secrets.SESSION_PROOF,
       },
     });
 
     const logResult = run('docker', composeArgs(project, verifyEnv, 'logs', '--no-color'), { capture: true });
     const logs = `${logResult.stdout ?? ''}\n${logResult.stderr ?? ''}`;
-    for (const key of ['ENGINE_TOKEN', 'WORKER_TOKEN', 'BREACH5_PROOF']) {
+    for (const key of [
+      'ENGINE_TOKEN', 'WORKER_TOKEN', 'BREACH5_PROOF',
+      'SESSION_ENGINE_TOKEN', 'SESSION_LAB_CLIENT_SECRET', 'SESSION_SIGNING_SECRET', 'SESSION_PROOF',
+    ]) {
       if (secrets[key] && logs.includes(secrets[key])) throw new Error(`${key} leaked into container logs`);
     }
     console.log('BREACH//5 live contract and log audit passed.');
@@ -457,12 +513,14 @@ async function doctor() {
 
 async function status() {
   if (!(await exists(boothEnv))) return console.log('BREACH//5 has not been initialized.');
-  run('docker', composeArgs(defaultProject, boothEnv, 'ps'));
+  const envFile = await ensureBoothEnv();
+  run('docker', composeArgs(defaultProject, envFile, 'ps'));
 }
 
 async function logs() {
   if (!(await exists(boothEnv))) return console.log('BREACH//5 has not been initialized.');
-  run('docker', composeArgs(defaultProject, boothEnv, 'logs', '--no-color', '--tail', '200'));
+  const envFile = await ensureBoothEnv();
+  run('docker', composeArgs(defaultProject, envFile, 'logs', '--no-color', '--tail', '200'));
 }
 
 async function reset() {

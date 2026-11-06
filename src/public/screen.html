@@ -17,56 +17,47 @@
       </div>
       <div class="screen-clock">
         <div class="screen-clock-label">
-          <span id="phase-label">연결 중</span>
-          <small id="phase-clock">단계 --:--</small>
+          <span id="phase-label">두 사건 동시 운영</span>
+          <small id="phase-clock">최대 03:00 · 응답 완료 시 조기 진행</small>
         </div>
-        <strong id="clock">05:00</strong>
+        <strong id="clock">03:00</strong>
       </div>
     </header>
 
     <section class="screen-grid">
       <article class="mission-panel panel">
-        <div class="panel-kicker">CURRENT INCIDENT</div>
-        <h1 id="scenario-title">두 명의 경비원</h1>
-        <p id="scenario-brief">같은 URL을 두 시스템이 다르게 해석하고 있습니다.</p>
-        <div id="phase-track" class="phase-track" aria-label="라운드 진행 단계"></div>
-
-        <div class="attack-graph" aria-label="공격 경로">
-          <div class="graph-node" data-step="DISCOVER"><span>01</span><b>증거</b><small>raw target</small></div>
-          <i aria-hidden="true"></i>
-          <div class="graph-node" data-step="BUILD"><span>02</span><b>Gateway</b><small>canonical</small></div>
-          <i aria-hidden="true"></i>
-          <div class="graph-node" data-step="EXECUTE"><span>03</span><b>Worker</b><small>raw value</small></div>
-          <i aria-hidden="true"></i>
-          <div class="graph-node" data-step="REVERIFY"><span>04</span><b>Patch</b><small>retest</small></div>
+        <div class="panel-kicker">LIVE INCIDENT LANES</div>
+        <h1 id="scenario-title">증거로 입증하고 패치하라</h1>
+        <p id="scenario-brief">같은 판정 엔진에서 초급 Guided와 고급 Analyst가 함께 참여합니다.</p>
+        <div id="lane-board" class="lane-board" aria-live="polite">
+          <div class="lane-empty">사건 lane 상태를 불러오는 중입니다.</div>
         </div>
-
-        <div id="event-banner" class="event-banner">다음 패킷을 기다리는 중입니다.</div>
+        <div id="event-banner" class="event-banner">Raw HTTP와 로그를 비교할 참가자를 기다리고 있습니다.</div>
       </article>
 
       <aside class="join-panel panel">
         <div class="panel-kicker">JOIN WITH YOUR PHONE</div>
-        <div id="join-mode" class="join-mode">현재 판 참가 확인 중</div>
+        <div id="join-mode" class="join-mode">현재 입장 가능 여부 확인 중</div>
         <div class="qr-frame"><img src="/api/qr.svg" alt="모바일 참가 QR 코드"></div>
         <p id="join-url" class="join-url"></p>
         <div class="team-board">
           <div class="team-card red-card">
-            <span>▲ RED</span><strong id="red-count">0</strong><small id="red-status">공격팀 · 대기</small>
-            <div class="meter"><i id="red-meter"></i></div>
+            <span>초급 · GUIDED</span><strong id="beginner-count">0</strong><small>주석·판단 근거 제공</small>
+            <div class="meter"><i id="beginner-meter"></i></div>
           </div>
-          <div class="versus">VS</div>
+          <div class="versus">+</div>
           <div class="team-card blue-card">
-            <span>⬟ BLUE</span><strong id="blue-count">0</strong><small id="blue-status">방어팀 · 대기</small>
-            <div class="meter"><i id="blue-meter"></i></div>
+            <span>고급 · ANALYST</span><strong id="advanced-count">0</strong><small>원문 증거 중심</small>
+            <div class="meter"><i id="advanced-meter"></i></div>
           </div>
         </div>
       </aside>
     </section>
 
     <footer class="screen-footer">
-      <div class="stat"><span>RED 승리</span><strong id="red-wins">0</strong></div>
+      <div class="stat"><span>RED 침해</span><strong id="red-wins">0</strong></div>
       <div class="stat"><span>침해 후 봉쇄</span><strong id="contained">0</strong></div>
-      <div class="stat"><span>BLUE 승리</span><strong id="blue-wins">0</strong></div>
+      <div class="stat"><span>BLUE 차단</span><strong id="blue-wins">0</strong></div>
       <div class="next-round"><span>다음 판</span><b id="next-round-text">대기 인원 확인 중</b></div>
     </footer>
   </main>

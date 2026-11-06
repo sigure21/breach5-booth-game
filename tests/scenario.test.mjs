@@ -1,22 +1,75 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { buildAttackPath, taskIdsFor, validateChoice } from '../src/scenario.mjs';
+import { inflateSync } from 'node:zlib';
+import { buildAttackPath } from '../src/scenario.mjs';
+import { DIFFICULTIES, getScenario, publicCatalog } from '../src/scenarios/index.mjs';
+import { PUBLIC_DEMO_SECRET } from '../src/scenarios/session-heist.mjs';
 
-test('intended cards generate the raw/canonical differential request', () => {
-  const path = buildAttackPath({
-    prefix: 'command_substitution', normalization: 'encoded_parent', sink: 'cold_start', variant: 'original',
-  });
-  assert.equal(path, '/x$(printenv${IFS}BREACH5_PROOF)x/%2e%2e/apps/builtin-code/proxy.php?status=1');
-  assert.match(buildAttackPath({
-    prefix: 'command_substitution', normalization: 'encoded_parent', sink: 'cold_start', variant: 'backtick_variant',
-  }), /`printenv\$\{IFS\}BREACH5_PROOF`/);
+test('catalog exposes two distinct fictional lab scenarios and two difficulties', () => {
+  assert.deepEqual(DIFFICULTIES, ['BEGINNER', 'ADVANCED']);
+  const catalog = publicCatalog();
+  assert.deepEqual(catalog.map(({ id }) => id), ['proxy-panic', 'session-heist']);
+  const heist = catalog.find(({ id }) => id === 'session-heist');
+  assert.equal(heist.rewardClaim, '$90,000 reported by the researcher');
+  assert.match(heist.sourceUrl, /^https:\/\/simonkoeck\.com\//);
+  assert.equal('cve' in heist, false);
 });
 
-test('cards are allowlisted and role-scoped', () => {
-  assert.equal(validateChoice('prefix', 'command_substitution'), true);
-  assert.equal(validateChoice('prefix', 'arbitrary shell text'), false);
-  assert.deepEqual(taskIdsFor({ phase: 'BUILD', team: 'RED', role: 'SCOUT', teamSize: 3 }), ['normalization']);
-  assert.deepEqual(taskIdsFor({ phase: 'BUILD', team: 'RED', role: 'BUILDER', teamSize: 3 }), ['prefix']);
-  assert.deepEqual(taskIdsFor({ phase: 'BUILD', team: 'RED', role: 'RUNNER', teamSize: 3 }), ['sink']);
-  assert.deepEqual(taskIdsFor({ phase: 'BUILD', team: 'RED', role: 'SCOUT', teamSize: 2 }), ['prefix', 'normalization', 'sink']);
+test('beginner and advanced views share canonical choices but differ in guidance', () => {
+  for (const scenarioId of ['proxy-panic', 'session-heist']) {
+    const scenario = getScenario(scenarioId);
+    const [taskId] = Object.keys(scenario.tasks);
+    const beginner = scenario.publicTask(taskId, { difficulty: 'BEGINNER' });
+    const advanced = scenario.publicTask(taskId, { difficulty: 'ADVANCED' });
+    assert.deepEqual(beginner.options.map(({ id }) => id), advanced.options.map(({ id }) => id));
+    assert.ok(beginner.evidence.some(({ annotation }) => typeof annotation === 'string' && annotation.length > 0));
+    assert.ok(advanced.evidence.every(({ annotation }) => annotation === null));
+    assert.equal(scenario.validateChoice(taskId, beginner.options[0].id), true);
+    assert.equal(scenario.validateChoice(taskId, 'arbitrary-user-input'), false);
+  }
+});
+
+test('proxy evidence builds the literal raw/canonical differential request', () => {
+  const scenario = getScenario('proxy-panic');
+  const choices = { prefix: 'command_substitution', normalization: 'encoded_parent', sink: 'cold_start' };
+  assert.equal(
+    buildAttackPath({ ...choices, variant: 'original' }),
+    '/x$(printenv${IFS}BREACH5_PROOF)x/%2e%2e/apps/builtin-code/proxy.php?status=1',
+  );
+  const preview = scenario.preview(choices);
+  assert.match(preview.request, /GET \/x\$\(printenv\$\{IFS\}BREACH5_PROOF\)x\/%2e%2e\/apps\/builtin-code\/proxy\.php/);
+  assert.match(preview.trace.join('\n'), /CANONICAL \/apps\/builtin-code\/proxy\.php/);
+});
+
+test('session-heist evidence is fictional, bounded, and contains no runtime secret', () => {
+  const scenario = getScenario('session-heist');
+  const serialized = JSON.stringify(scenario.tasks);
+  assert.match(serialized, /devsite-lab\.invalid/);
+  assert.match(serialized, /BINFLOAT 0\.05/);
+  assert.match(serialized, /complete public demo cookie/);
+  assert.match(serialized, /SHORT_BINBYTES/);
+  assert.ok(serialized.includes(PUBLIC_DEMO_SECRET));
+  assert.doesNotMatch(serialized.replaceAll(PUBLIC_DEMO_SECRET, ''), /google\.com|accounts\.google|[a-f0-9]{64}/i);
+  assert.doesNotMatch(serialized, /\/bin\/sh/);
+  const cookie = scenario.tasks.sh_decode.evidence.find(({ id }) => id === 'cookie-shape').value;
+  const [, payload] = cookie.split('.');
+  const decoded = JSON.parse(inflateSync(Buffer.from(payload, 'base64url')).toString('utf8'));
+  const flow = Buffer.from(decoded['google_oauth2_flow_issued-state'][' b'], 'base64');
+  assert.ok(flow.includes(Buffer.from(PUBLIC_DEMO_SECRET)), 'public demo cookie must decode to the shown credential');
+  const preview = scenario.preview({
+    sh_decode: 'base64_zlib_tagged_json', sh_secret: 'pickle_client_secret',
+    sh_forge: 'matching_state_flow', sh_gadget: 'bounded_sleep_reduce',
+  });
+  assert.match(preview.request, /Host: devsite-lab\.invalid/);
+  assert.match(preview.trace.join('\n'), /attacker-chosen/);
+
+  const controls = scenario.publicTask('sh_control', {
+    difficulty: 'ADVANCED',
+    execution: {
+      timingMs: 50.2,
+      controls: [{ id: 'flipped_signature', passed: true, reason: 'invalid_session', timingMs: 0.4 }],
+    },
+  });
+  assert.match(controls.evidence.find(({ id }) => id === 'timings').value, /flipped_signature → PASS/);
+  assert.ok(controls.evidence.every(({ annotation }) => annotation === null));
 });

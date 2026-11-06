@@ -1,191 +1,234 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { DeterministicAdjudicator } from '../src/adjudicator.mjs';
+import { createDeterministicRegistry } from '../src/adjudicator.mjs';
 import { GameStore } from '../src/game.mjs';
+import { getScenario } from '../src/scenarios/index.mjs';
 
-function fixture() {
+function fixture({ maxPlayers = 16 } = {}) {
   let now = 0;
+  let device = 0;
+  const adjudicators = createDeterministicRegistry();
   const store = new GameStore({
-    now: () => now,
-    adjudicator: new DeterministicAdjudicator(),
-    roundMs: 300_000,
-    epochMs: 0,
+    now: () => now, adjudicators, roundMs: 18_000, epochMs: 0, maxPlayers,
   });
-  return { store, setNow: (value) => { now = value; } };
+  const join = (scenarioId = 'proxy-panic', difficulty = 'BEGINNER') => {
+    device += 1;
+    return store.join(null, device.toString(16).padStart(32, '0'), scenarioId, difficulty);
+  };
+  return { store, adjudicators, join, setNow: (value) => { now = value; }, getNow: () => now };
 }
 
-test('join balances teams and assigns all six roles', () => {
+function submitVisible(store, player, scenario, counter) {
+  const state = store.state(player.token);
+  for (const task of state.tasks) {
+    const expected = scenario.correct[task.id];
+    const choice = Array.isArray(expected) ? expected[0] : expected;
+    store.submit(player.token, {
+      roundId: state.round.roundId,
+      task: task.id,
+      choice,
+      actionId: `action_${String(counter.value).padStart(4, '0')}`,
+    });
+    counter.value += 1;
+  }
+  return state.tasks.map(({ id }) => id);
+}
+
+async function solveFullStack(scenarioId) {
+  const context = fixture();
+  const { store, join, setNow } = context;
+  const player = join(scenarioId, 'ADVANCED');
+  const scenario = getScenario(scenarioId);
+  const counter = { value: 1 };
+
+  setNow(1_500); await store.tick();
+  setNow(1_800); await store.tick();
+  assert.equal(store.state(player.token).round.phase, 'DISCOVER');
+  submitVisible(store, player, scenario, counter);
+
+  setNow(2_100); await store.tick();
+  assert.equal(store.state(player.token).round.phase, 'BUILD');
+  submitVisible(store, player, scenario, counter);
+
+  setNow(2_400); await store.tick();
+  assert.equal(store.state(player.token).round.phase, 'EXECUTE');
+  assert.equal(store.state(player.token).execution.proofReached, true);
+
+  setNow(2_700); await store.tick();
+  assert.equal(store.state(player.token).round.phase, 'DUEL');
+  submitVisible(store, player, scenario, counter);
+
+  setNow(3_000); await store.tick();
+  assert.equal(store.state(player.token).round.phase, 'REVERIFY');
+  setNow(3_300); await store.tick();
+  const state = store.state(player.token);
+  assert.equal(state.round.phase, 'RESULT');
+  return { ...context, player, state };
+}
+
+test('new joins require allowlisted scenario and difficulty values', () => {
   const { store } = fixture();
-  const players = Array.from({ length: 6 }, () => store.join());
-  assert.deepEqual(players.map((player) => player.team), ['RED', 'BLUE', 'RED', 'BLUE', 'RED', 'BLUE']);
-  assert.deepEqual(players.filter((player) => player.team === 'RED').map((player) => player.role), ['SCOUT', 'BUILDER', 'RUNNER']);
-  assert.deepEqual(players.filter((player) => player.team === 'BLUE').map((player) => player.role), ['MONITOR', 'GATEKEEPER', 'PATCHER']);
+  assert.throws(() => store.join(null, '0'.repeat(32), null, 'BEGINNER'), (error) => error.code === 'invalid_scenario');
+  assert.throws(() => store.join(null, '1'.repeat(32), 'proxy-panic', 'EASY'), (error) => error.code === 'invalid_difficulty');
+  assert.throws(() => store.join(null, '2'.repeat(32), 'invented', 'BEGINNER'), (error) => error.code === 'invalid_scenario');
 });
 
-test('late joins queue for the next round and each round is capped', () => {
-  const { store, setNow } = fixture();
-  Array.from({ length: 16 }, () => store.join());
-  assert.equal(store.join().roundId, 'r1');
-  setNow(30_001);
-  assert.equal(store.join().roundId, 'r1');
-});
-
-test('current-round enrollment closes exactly when the JOIN phase ends', () => {
-  const { store, setNow } = fixture();
-  setNow(19_999);
-  assert.equal(store.join().roundId, 'r0');
-  setNow(20_000);
-  assert.equal(store.join().roundId, 'r1');
-});
-
-test('actions are phase-bound, idempotent, and produce a contained breach', async () => {
-  const { store, setNow } = fixture();
-  const [redScout, blueMonitor, redBuilder, blueGatekeeper, redRunner, bluePatcher] = Array.from({ length: 6 }, () => store.join());
-
-  setNow(50_000);
-  store.submit(redScout.token, { roundId: 'r0', task: 'trust_boundary', choice: 'parser_mismatch', actionId: 'discover_red_01' });
-  store.submit(blueMonitor.token, { roundId: 'r0', task: 'anomaly', choice: 'route_views_differ', actionId: 'discover_blue_1' });
-  assert.deepEqual(store.submit(redScout.token, { roundId: 'r0', task: 'trust_boundary', choice: 'parser_mismatch', actionId: 'discover_red_01' }), { ok: true, duplicate: true });
-  assert.throws(() => store.submit(redScout.token, { roundId: 'r0', task: 'prefix', choice: 'command_substitution', actionId: 'wrong_phase_001' }), /phase_closed/);
-
-  setNow(95_000);
-  store.submit(redBuilder.token, { roundId: 'r0', task: 'prefix', choice: 'command_substitution', actionId: 'build_prefix_01' });
-  store.submit(redScout.token, { roundId: 'r0', task: 'normalization', choice: 'encoded_parent', actionId: 'build_normal_01' });
-  store.submit(redRunner.token, { roundId: 'r0', task: 'sink', choice: 'cold_start', actionId: 'build_sink_0001' });
-  store.submit(blueGatekeeper.token, { roundId: 'r0', task: 'guard', choice: 'canonical_once', actionId: 'build_guard_001' });
-
-  setNow(155_000);
-  await store.tick();
-  assert.equal(store.getRound(0).baseline.proofReached, true);
-
-  setNow(185_000);
-  store.submit(redScout.token, { roundId: 'r0', task: 'bypass', choice: 'backtick_variant', actionId: 'duel_bypass_001' });
-  store.submit(bluePatcher.token, { roundId: 'r0', task: 'patch', choice: 'canonical_once', actionId: 'duel_patch_0001' });
-
-  setNow(245_000);
-  await store.tick();
-  assert.equal(store.getRound(0).patch.effective, true);
-
-  setNow(275_000);
-  await store.tick();
-  const state = store.state(redScout.token);
-  assert.equal(state.result.outcome, 'BREACHED_THEN_CONTAINED');
-  assert.equal(state.result.redScore, 3);
-  assert.equal(state.result.blueScore, 4);
-});
-
-test('tokens reconnect without changing identity', () => {
-  const { store } = fixture();
-  const joined = store.join();
-  const rejoined = store.join(joined.token);
-  assert.deepEqual(rejoined, joined);
-});
-
-test('a stable device id reuses the same anonymous identity', () => {
+test('same device reconnect preserves its original scenario and difficulty', () => {
   const { store } = fixture();
   const deviceId = '0123456789abcdef0123456789abcdef';
-  const joined = store.join(null, deviceId);
-  const rejoinedWithoutToken = store.join(null, deviceId);
-  assert.deepEqual(rejoinedWithoutToken, joined);
-  assert.equal(store.getRound(0).players.size, 1);
+  const original = store.join(null, deviceId, 'proxy-panic', 'BEGINNER');
+  const attemptedChange = store.join(null, deviceId, 'session-heist', 'ADVANCED');
+  assert.deepEqual(attemptedChange, original);
+  assert.equal(original.scenarioId, 'proxy-panic');
+  assert.equal(original.difficulty, 'BEGINNER');
+  assert.equal(store.getRound(0, 'proxy-panic').players.size, 1);
+  assert.equal(store.getRound(0, 'session-heist').players.size, 0);
 });
 
-test('the first task choice is locked while an identical action id stays idempotent', () => {
-  const { store, setNow } = fixture();
-  const player = store.join();
-  setNow(50_000);
-  const first = {
-    roundId: 'r0', task: 'trust_boundary', choice: 'parser_mismatch', actionId: 'choice_lock_01',
-  };
-  assert.deepEqual(store.submit(player.token, first), { ok: true, selected: 'parser_mismatch' });
-  assert.deepEqual(store.submit(player.token, first), { ok: true, duplicate: true });
-  assert.throws(() => store.submit(player.token, {
-    ...first, choice: 'backend_down', actionId: 'choice_lock_02',
-  }), (error) => error.code === 'choice_locked');
+test('capacity is global across scenario lanes and late participants queue', () => {
+  const { store, join } = fixture({ maxPlayers: 2 });
+  assert.match(join('proxy-panic').roundId, /^r0-/);
+  assert.match(join('session-heist').roundId, /^r0-/);
+  assert.match(join('proxy-panic').roundId, /^r1-/);
+  assert.match(join('session-heist').roundId, /^r1-/);
+  assert.throws(() => join('proxy-panic'), (error) => error.code === 'capacity');
 });
 
-test('queued players receive current-round context and the screen exposes next-round demand', () => {
-  const { store, setNow } = fixture();
-  store.join(null, '00000000000000000000000000000001');
-  setNow(30_001);
-  const queued = store.join(null, '00000000000000000000000000000002');
-  const queuedState = store.state(queued.token);
-  assert.equal(queuedState.round.phase, 'QUEUED');
-  assert.equal(queuedState.queue.currentPhase, 'BRIEF');
-  assert.equal(queuedState.queue.nextCounts.RED, 1);
-  assert.equal(queuedState.queue.nextCounts.BLUE, 0);
-
-  const screen = store.screenState();
-  assert.equal(screen.joinMode, 'NEXT');
-  assert.equal(screen.nextRound.total, 1);
-  assert.equal(screen.nextRound.counts.RED, 1);
-  assert.equal(screen.nextRound.startsInMs, screen.round.remainingMs);
-
-  for (let index = 0; index < 15; index += 1) {
-    store.join(null, (index + 3).toString(16).padStart(32, '0'));
-  }
-  assert.equal(store.screenState().joinMode, 'FULL');
+test('one participant seals as FULL_STACK and receives both teams tasks once', async () => {
+  const { store, join, setNow } = fixture();
+  const player = join('session-heist');
+  setNow(1_500); await store.tick();
+  setNow(1_800); await store.tick();
+  const state = store.state(player.token);
+  assert.equal(state.player.mode, 'FULL_STACK');
+  assert.equal(state.player.team, 'FULL');
+  assert.deepEqual(state.tasks.map(({ id }) => id), ['sh_surface', 'sh_anomaly']);
+  assert.equal(store.requiredKeys(store.getRound(0, 'session-heist'), 'DISCOVER').length, 2);
 });
 
-test('team progress counts each required player response', () => {
-  const { store, setNow } = fixture();
-  const players = Array.from({ length: 6 }, () => store.join());
-  const red = players.find((player) => player.team === 'RED');
-  setNow(50_000);
-  store.submit(red.token, {
-    roundId: 'r0', task: 'trust_boundary', choice: 'parser_mismatch', actionId: 'progress_vote_01',
+test('two participants seal into RED and BLUE with team-specific work', async () => {
+  const { store, join, setNow } = fixture();
+  const red = join('proxy-panic');
+  const blue = join('proxy-panic', 'ADVANCED');
+  setNow(1_500); await store.tick();
+  setNow(1_800); await store.tick();
+  assert.equal(store.state(red.token).player.mode, 'TEAMS');
+  assert.equal(store.state(red.token).player.team, 'RED');
+  assert.equal(store.state(blue.token).player.team, 'BLUE');
+  assert.deepEqual(store.state(red.token).tasks.map(({ id }) => id), ['trust_boundary']);
+  assert.deepEqual(store.state(blue.token).tasks.map(({ id }) => id), ['anomaly']);
+});
+
+test('scenario cohorts do not leak actions or previews into one another', async () => {
+  const { store, join, setNow } = fixture();
+  const proxy = join('proxy-panic');
+  const session = join('session-heist');
+  setNow(1_500); await store.tick();
+  setNow(1_800); await store.tick();
+  store.submit(proxy.token, {
+    roundId: 'r0-proxy-panic', task: 'trust_boundary', choice: 'parser_mismatch', actionId: 'isolated_action_01',
   });
-  const progress = store.screenState().progress;
-  assert.equal(progress.RED, 33);
-  assert.equal(progress.BLUE, 0);
+  const sessionState = store.state(session.token);
+  assert.equal(sessionState.scenario.id, 'session-heist');
+  assert.ok(sessionState.tasks.every(({ selected }) => selected === null));
+  assert.equal(store.getRound(0, 'session-heist').actions.size, 0);
 });
 
-test('engine failures take precedence over apparently blocked or breached outcomes', async () => {
-  let now = 0;
-  const adjudicator = {
-    async ready() { return true; },
-    async runBaseline() {
-      return {
-        status: 503, routeAccepted: true, bootstrapTriggered: true, proofReached: true,
-        blocked: false, reason: 'safe_proof_reached', rawHttp: 'GET / HTTP/1.1',
-      };
-    },
-    async runPatch() { throw new Error('patched engine unavailable'); },
+test('completed evidence responses advance before the phase ceiling', async () => {
+  const { store, join, setNow } = fixture();
+  const player = join('proxy-panic');
+  const scenario = getScenario('proxy-panic');
+  const counter = { value: 1 };
+  setNow(1_500); await store.tick();
+  setNow(1_800); await store.tick();
+  const deadline = store.state(player.token).round.phaseEndsAt;
+  submitVisible(store, player, scenario, counter);
+  setNow(2_100); await store.tick();
+  const state = store.state(player.token);
+  assert.equal(state.round.phase, 'BUILD');
+  assert.ok(2_100 < deadline, 'DISCOVER should finish before its maximum deadline');
+});
+
+test('missing responses never become hidden default choices', async () => {
+  const { store, join, setNow } = fixture();
+  const player = join('proxy-panic');
+  setNow(1_500); await store.tick();
+  setNow(1_800); await store.tick();
+  setNow(4_300); await store.tick();
+  assert.equal(store.state(player.token).round.phase, 'BUILD');
+  setNow(8_300); await store.tick();
+  const execution = store.state(player.token).execution;
+  assert.equal(execution.proofReached, false);
+  assert.equal(execution.reason, 'incomplete_submission');
+  assert.ok(Object.values(store.getRound(0, 'proxy-panic').scenario.aggregate(new Map())).every((value) => value === null));
+});
+
+test('actions are phase-bound, allowlisted, idempotent, and first choice locked', async () => {
+  const { store, join, setNow } = fixture();
+  const player = join('proxy-panic');
+  setNow(1_500); await store.tick();
+  setNow(1_800); await store.tick();
+  const action = {
+    roundId: 'r0-proxy-panic', task: 'trust_boundary', choice: 'parser_mismatch', actionId: 'choice_lock_01',
   };
-  const store = new GameStore({ now: () => now, adjudicator, roundMs: 300_000, epochMs: 0 });
-  const player = store.join();
-  now = 155_000;
-  await store.tick();
-  now = 245_000;
-  await store.tick();
-  now = 275_000;
-  await store.tick();
-  assert.equal(store.state(player.token).result.outcome, 'ENGINE_ERROR');
+  assert.deepEqual(store.submit(player.token, action), { ok: true, selected: 'parser_mismatch' });
+  assert.deepEqual(store.submit(player.token, action), { ok: true, duplicate: true });
+  assert.match(store.state(player.token).observations[0].observation, /경로 표현/);
+  assert.throws(() => store.submit(player.token, { ...action, choice: 'backend_down', actionId: 'choice_lock_02' }),
+    (error) => error.code === 'choice_locked');
+  assert.throws(() => store.submit(player.token, {
+    roundId: 'r0-proxy-panic', task: 'prefix', choice: 'command_substitution', actionId: 'wrong_phase_001',
+  }), (error) => error.code === 'phase_closed');
+  assert.throws(() => store.submit(player.token, {
+    roundId: 'r0-proxy-panic', task: 'trust_boundary', choice: 'arbitrary', actionId: 'bad_choice_0001',
+  }), (error) => error.code === 'invalid_choice');
 });
 
-test('the deterministic engine mirrors the live patch and gateway matrix', async () => {
-  const adjudicator = new DeterministicAdjudicator();
-  const literalReplay = await adjudicator.runPatch({ patch: 'block_subshell', bypass: 'original' });
-  assert.equal(literalReplay.original.blocked, true);
-  assert.equal(literalReplay.variant.proofReached, false);
-  assert.equal(literalReplay.effective, true);
-
-  const literalBypass = await adjudicator.runPatch({ patch: 'block_subshell', bypass: 'backtick_variant' });
-  assert.equal(literalBypass.variant.proofReached, true);
-  assert.equal(literalBypass.variant.blocked, false);
-  assert.equal(literalBypass.effective, false);
-
-  const gatewayReject = await adjudicator.runPatch({ patch: 'hide_errors', bypass: 'double_encoded' });
-  assert.equal(gatewayReject.variant.routeAccepted, false);
-  assert.equal(gatewayReject.variant.proofReached, false);
-  assert.equal(gatewayReject.variant.blocked, false);
-  assert.equal(gatewayReject.effective, false);
-
-  for (const patch of ['canonical_once', 'structured_exec']) {
-    const verdict = await adjudicator.runPatch({ patch, bypass: 'backtick_variant' });
-    assert.equal(verdict.original.blocked, false);
-    assert.equal(verdict.variant.blocked, false);
-    assert.equal(verdict.normal.bootstrapTriggered, true);
-    assert.equal(verdict.effective, true);
-  }
+test('tentative preview uses allowlisted choices without mutating the round', async () => {
+  const { store, join, setNow } = fixture();
+  const player = join('proxy-panic');
+  const scenario = getScenario('proxy-panic');
+  const counter = { value: 1 };
+  setNow(1_500); await store.tick();
+  setNow(1_800); await store.tick();
+  submitVisible(store, player, scenario, counter);
+  setNow(2_100); await store.tick();
+  const before = store.getRound(0, 'proxy-panic').actions.size;
+  const preview = store.preview(player.token, {
+    roundId: 'r0-proxy-panic', task: 'prefix', choice: 'command_substitution',
+  });
+  assert.match(preview.preview.request, /x\$\(printenv\$\{IFS\}BREACH5_PROOF\)x/);
+  assert.equal(store.getRound(0, 'proxy-panic').actions.size, before);
+  assert.throws(() => store.preview(player.token, {
+    roundId: 'r0-proxy-panic', task: 'prefix', choice: 'free-form-command',
+  }), (error) => error.code === 'invalid_choice');
 });
+
+test('idempotency keys are scoped per participant and empty lanes become IDLE', async () => {
+  const { store, join, setNow } = fixture();
+  const red = join('proxy-panic');
+  const blue = join('proxy-panic');
+  setNow(1_500); await store.tick();
+  setNow(1_800); await store.tick();
+  store.submit(red.token, {
+    roundId: 'r0-proxy-panic', task: 'trust_boundary', choice: 'parser_mismatch', actionId: 'shared_action_01',
+  });
+  store.submit(blue.token, {
+    roundId: 'r0-proxy-panic', task: 'anomaly', choice: 'route_views_differ', actionId: 'shared_action_01',
+  });
+  assert.equal(store.getRound(0, 'proxy-panic').actions.size, 2);
+  const idle = store.screenState().lanes.find(({ scenario }) => scenario.id === 'session-heist');
+  assert.equal(idle.round.phase, 'IDLE');
+});
+
+for (const scenarioId of ['proxy-panic', 'session-heist']) {
+  test(`${scenarioId} reaches a real breach then an effective regression-tested patch`, async () => {
+    const { state } = await solveFullStack(scenarioId);
+    assert.equal(state.result.outcome, 'BREACHED_THEN_CONTAINED');
+    assert.equal(state.result.baseline.proofReached, true);
+    assert.equal(state.result.patch.effective, true);
+    assert.deepEqual(state.result.incompleteTasks, []);
+    assert.equal(state.result.redScore, state.result.redPossible);
+    assert.equal(state.result.blueScore, state.result.bluePossible);
+  });
+}

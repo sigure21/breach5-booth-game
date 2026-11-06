@@ -1,19 +1,19 @@
-export const PRODUCTION_ROUND_MS = 300_000;
+export const PRODUCTION_ROUND_MS = 180_000;
 
 export const PHASES = Object.freeze([
-  { id: 'JOIN', start: 0, end: 20 },
-  { id: 'BRIEF', start: 20, end: 50 },
-  { id: 'DISCOVER', start: 50, end: 95 },
-  { id: 'BUILD', start: 95, end: 155 },
-  { id: 'EXECUTE', start: 155, end: 185 },
-  { id: 'DUEL', start: 185, end: 245 },
-  { id: 'REVERIFY', start: 245, end: 275 },
-  { id: 'RESULT', start: 275, end: 300 },
+  { id: 'JOIN', start: 0, end: 15 },
+  { id: 'BRIEF', start: 15, end: 23 },
+  { id: 'DISCOVER', start: 23, end: 48 },
+  { id: 'BUILD', start: 48, end: 88 },
+  { id: 'EXECUTE', start: 88, end: 103 },
+  { id: 'DUEL', start: 103, end: 138 },
+  { id: 'REVERIFY', start: 138, end: 163 },
+  { id: 'RESULT', start: 163, end: 180 },
 ]);
 
 export function assertRoundDuration(roundMs) {
   if (!Number.isInteger(roundMs) || roundMs < 3_000 || roundMs > PRODUCTION_ROUND_MS) {
-    throw new Error('ROUND_DURATION_MS must be an integer between 3000 and 300000');
+    throw new Error('ROUND_DURATION_MS must be an integer between 3000 and 180000');
   }
   return roundMs;
 }
@@ -22,8 +22,8 @@ export function phaseBounds(roundMs = PRODUCTION_ROUND_MS) {
   assertRoundDuration(roundMs);
   return PHASES.map((phase, index) => ({
     ...phase,
-    startMs: index === 0 ? 0 : Math.round((phase.start / 300) * roundMs),
-    endMs: index === PHASES.length - 1 ? roundMs : Math.round((phase.end / 300) * roundMs),
+    startMs: index === 0 ? 0 : Math.round((phase.start / 180) * roundMs),
+    endMs: index === PHASES.length - 1 ? roundMs : Math.round((phase.end / 180) * roundMs),
   }));
 }
 
