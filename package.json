@@ -1,9 +1,9 @@
 {
   "name": "breach5-booth-game",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
   "type": "module",
-  "description": "A five-minute mobile security racing game with evidence-based decisions and current threat briefings.",
+  "description": "A four-racer mobile security sprint with evidence-based decisions, AI grid fill, and current threat briefings.",
   "license": "MIT",
   "engines": {
     "node": ">=22"

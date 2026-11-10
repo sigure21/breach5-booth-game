@@ -3,56 +3,25 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#040a10">
-  <title>BREACH//5 · NITRO GRID LIVE</title>
+  <meta name="theme-color" content="#050b10">
+  <meta name="description" content="NITRO GRID 4-car live race board">
+  <title>NITRO GRID · LIVE RACE</title>
   <link rel="stylesheet" href="/assets/app.css">
 </head>
 <body class="screen-body">
-  <div class="screen-grid-overlay" aria-hidden="true"></div>
+  <div class="ambient-grid" aria-hidden="true"></div>
   <main class="screen-shell">
     <header class="screen-header">
-      <div class="screen-brand">
-        <div class="screen-kicker">OWASP KOREA 2026 · SECURITY RACING LAB</div>
-        <div class="screen-wordmark">BREACH//5 <span>NITRO GRID</span></div>
+      <div>
+        <span class="screen-kicker">OWASP KOREA 2026 · LIVE SECURITY RACING</span>
+        <h1>BREACH//5 <b>NITRO GRID</b></h1>
       </div>
-      <div class="screen-clock">
-        <div class="screen-clock-copy">
-          <span id="phase-label">그리드 상태 확인 중</span>
-          <small id="phase-clock">최대 05:00 · 정확도가 성능을 결정합니다</small>
-        </div>
-        <strong id="clock">05:00</strong>
-      </div>
+      <div class="screen-status"><span id="screen-status">RACE CONTROL SYNC</span><strong id="screen-clock">--:--</strong></div>
     </header>
-
-    <section class="screen-main">
-      <article class="screen-panel grid-panel">
-        <div class="panel-kicker">LIVE CIRCUITS</div>
-        <h1>보안 판단으로 결승선을 통과하라</h1>
-        <div id="lane-board" class="lane-board" aria-live="polite">
-          <div class="lane-card">서킷 상태를 불러오는 중입니다.</div>
-        </div>
-        <div id="event-banner" class="event-banner">휴대폰으로 QR을 스캔하고 팀과 드라이버를 선택하세요.</div>
-      </article>
-
-      <aside class="screen-panel join-panel">
-        <div class="panel-kicker">JOIN WITH YOUR PHONE</div>
-        <div id="join-mode" class="join-mode">입장 상태 확인 중</div>
-        <div class="qr-frame"><img src="/api/qr.svg" alt="모바일 참가 QR 코드"></div>
-        <p id="join-url" class="join-url"></p>
-        <div class="booth-stats">
-          <div class="booth-stat"><strong id="active-count">0</strong><span>현재 드라이버</span></div>
-          <div class="booth-stat"><strong id="finish-count">0</strong><span>완주</span></div>
-          <div class="booth-stat"><strong id="pole-count">0</strong><span>퍼펙트 랩</span></div>
-        </div>
-      </aside>
-    </section>
-
+    <section id="screen-app" class="screen-main" aria-live="polite"></section>
     <footer class="screen-footer">
-      <div class="screen-footer-copy">
-        <span>문제는 기본 보안 지식 30문항에서 서버가 결정론적으로 구성합니다.</span>
-        <small>비공식·비상업적 교육용 · EA SPORTS, F1, 각 팀·선수와 비제휴</small>
-      </div>
-      <b id="next-grid">다음 그리드 계산 중</b>
+      <div><span>4대 단위 매칭 · 30–45초 · 빈자리는 AI 투입 · 10 Security Encounters</span><small>비공식·비상업적 교육용 · F1, EA, 각 팀·선수와 비제휴</small><small>공식 서킷 특성에서 영감을 받은 오리지널 압축 시뮬레이션이며, 표시 속도·경로는 실제 telemetry가 아닙니다.</small></div>
+      <b>판단이 맞으면 머신이 빨라진다.</b>
     </footer>
   </main>
   <script type="module" src="/assets/screen.js"></script>

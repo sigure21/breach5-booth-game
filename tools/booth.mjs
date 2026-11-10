@@ -12,9 +12,29 @@ const composeFile = join(root, 'compose.yaml');
 const boothEnv = join(runtimeDir, 'booth.env');
 const defaultProject = 'breach5_nitro_grid';
 const overrideKeys = new Set([
-  'NITRO_GRID_SEED_SECRET', 'ROUND_DURATION_MS', 'MAX_PLAYERS',
+  'NITRO_GRID_SEED_SECRET', 'ROUND_DURATION_MS',
+  'MATCH_MIN_WAIT_MS', 'MATCH_MAX_WAIT_MS', 'GRID_COUNTDOWN_MS',
+  'ENCOUNTER_DURATION_MS', 'MIN_ENCOUNTER_MS', 'RESULT_DURATION_MS', 'MAX_PLAYERS',
   'BREACH5_BIND', 'BREACH5_PORT', 'BREACH5_IMAGE', 'PUBLIC_BASE_URL',
 ]);
+
+const productionTiming = Object.freeze({
+  matchMinWaitMs: 30_000,
+  matchMaxWaitMs: 45_000,
+  gridCountdownMs: 5_000,
+  encounterDurationMs: 18_000,
+  minEncounterMs: 4_000,
+  resultDurationMs: 25_000,
+});
+
+const verificationTiming = Object.freeze({
+  matchMinWaitMs: 300,
+  matchMaxWaitMs: 450,
+  gridCountdownMs: 100,
+  encounterDurationMs: 300,
+  minEncounterMs: 75,
+  resultDurationMs: 300,
+});
 
 function cleanComposeEnv(source = process.env) {
   const env = { ...source };
@@ -62,11 +82,16 @@ async function exists(path) {
   try { await stat(path); return true; } catch { return false; }
 }
 
-async function createEnv(path, { port, roundMs, image, publicBaseUrl }) {
+async function createEnv(path, { port, timing, image, publicBaseUrl }) {
   await mkdir(runtimeDir, { recursive: true });
   const text = [
     `NITRO_GRID_SEED_SECRET=${randomBytes(32).toString('hex')}`,
-    `ROUND_DURATION_MS=${roundMs}`,
+    `MATCH_MIN_WAIT_MS=${timing.matchMinWaitMs}`,
+    `MATCH_MAX_WAIT_MS=${timing.matchMaxWaitMs}`,
+    `GRID_COUNTDOWN_MS=${timing.gridCountdownMs}`,
+    `ENCOUNTER_DURATION_MS=${timing.encounterDurationMs}`,
+    `MIN_ENCOUNTER_MS=${timing.minEncounterMs}`,
+    `RESULT_DURATION_MS=${timing.resultDurationMs}`,
     'MAX_PLAYERS=48',
     'BREACH5_BIND=127.0.0.1',
     `BREACH5_PORT=${port}`,
@@ -98,14 +123,19 @@ async function ensureBoothEnv() {
   if (await exists(boothEnv)) {
     const values = await readEnv(boothEnv).catch(() => ({}));
     const valid = /^[a-f0-9]{64}$/i.test(values.NITRO_GRID_SEED_SECRET ?? '')
-      && values.ROUND_DURATION_MS === '300000'
+      && values.MATCH_MIN_WAIT_MS === String(productionTiming.matchMinWaitMs)
+      && values.MATCH_MAX_WAIT_MS === String(productionTiming.matchMaxWaitMs)
+      && values.GRID_COUNTDOWN_MS === String(productionTiming.gridCountdownMs)
+      && values.ENCOUNTER_DURATION_MS === String(productionTiming.encounterDurationMs)
+      && values.MIN_ENCOUNTER_MS === String(productionTiming.minEncounterMs)
+      && values.RESULT_DURATION_MS === String(productionTiming.resultDurationMs)
       && values.BREACH5_PORT === '18090';
     if (!valid) await rm(boothEnv, { force: true });
   }
   if (!(await exists(boothEnv))) {
     await createEnv(boothEnv, {
       port: 18090,
-      roundMs: 300_000,
+      timing: productionTiming,
       image: 'breach5-nitro-grid:local',
       publicBaseUrl: 'http://127.0.0.1:18090',
     });
@@ -244,7 +274,7 @@ async function verify() {
   const proxy = await createVerificationProxy();
   await createEnv(envFile, {
     port: 0,
-    roundMs: 30_000,
+    timing: verificationTiming,
     image: `breach5-nitro-grid:${project}`,
     publicBaseUrl: proxy.origin,
   });

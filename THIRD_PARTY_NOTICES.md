@@ -1,9 +1,9 @@
 # Third-party notices
 
-This file covers software dependencies. Driver-panel media and motorsport-related
-names are documented separately in [`docs/MEDIA_SOURCES.md`](docs/MEDIA_SOURCES.md).
-Those media files and marks are not relicensed under this repository's MIT
-license.
+This file covers software dependencies. Official car photographs, driver-panel
+media, and motorsport-related names and marks are documented separately in
+[`docs/MEDIA_SOURCES.md`](docs/MEDIA_SOURCES.md). Those media files and marks
+are not relicensed under this repository's MIT license.
 
 ## qrcode
 

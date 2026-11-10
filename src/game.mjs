@@ -1,24 +1,37 @@
 import { createHmac, randomBytes, randomInt } from 'node:crypto';
-import { clockAt, clockForOrdinal, phaseBounds, PRODUCTION_ROUND_MS } from './clock.mjs';
+import {
+  HEAT_SIZE,
+  PRODUCTION_ROUND_MS,
+  TOTAL_ENCOUNTERS,
+  TOTAL_LAPS,
+  maximumHeatRuntime,
+  scaledMatchTiming,
+} from './clock.mjs';
 import { QUESTION_BANK, QUESTION_BANK_VERSION } from './content/questions.mjs';
 import { TREND_CARDS } from './content/trends.mjs';
 import {
-  CREWS, DIFFICULTIES, DRIVERS, TRACKS,
-  getCrew, getDriver, getTrack, validateDifficulty,
+  CIRCUITS,
+  CREWS,
+  DIFFICULTIES,
+  DRIVERS,
+  getCrew,
+  getDriver,
+  validateDifficulty,
 } from './race/catalog.mjs';
 import { buildRaceDeck } from './race/seed.mjs';
-import { answerIsCorrect, finishBand, raceScore } from './race/scoring.mjs';
+import { answerIsCorrect, finishBand, raceScore, scoreFromResults } from './race/scoring.mjs';
 
-const ACTIVE_PHASES = ['LAUNCH', 'SECTOR_1', 'PIT_STOP', 'SECTOR_2', 'SPRINT', 'RESULT'];
-const TASK_PHASES = new Set(['LAUNCH', 'SECTOR_1', 'PIT_STOP', 'SECTOR_2', 'SPRINT']);
-const ADJECTIVES = ['NEON', 'SWIFT', 'QUIET', 'BRAVE', 'LUCID', 'NOVA', 'PIXEL', 'SOLAR'];
-const ANIMALS = ['OWL', 'FOX', 'OTTER', 'RAVEN', 'TIGER', 'GECKO', 'MANTA', 'LYNX'];
+const MATCH_STATUSES = Object.freeze(['MATCHING', 'GRID', 'RACING', 'RESULT', 'COMPLETE']);
+const ADJECTIVES = Object.freeze(['NEON', 'SWIFT', 'QUIET', 'BRAVE', 'LUCID', 'NOVA', 'PIXEL', 'SOLAR']);
+const ANIMALS = Object.freeze(['OWL', 'FOX', 'OTTER', 'RAVEN', 'TIGER', 'GECKO', 'MANTA', 'LYNX']);
+const AI_NAMES = Object.freeze(['AI APEX', 'AI VECTOR', 'AI CHICANE']);
+const SAFE_VALUE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const SAFE_ACTION_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{7,127}$/;
 
 function token() { return randomBytes(24).toString('base64url'); }
-function id(prefix) { return `${prefix}_${randomBytes(8).toString('hex')}`; }
-function roundKey(ordinal, trackId) { return `${ordinal}:${trackId}`; }
-function publicRoundId(ordinal, trackId) { return `r${ordinal}-${trackId}`; }
+function randomId(prefix) { return `${prefix}_${randomBytes(8).toString('hex')}`; }
 function safeText(value) { return typeof value === 'string' ? value : ''; }
+function clamp(value, minimum, maximum) { return Math.max(minimum, Math.min(maximum, value)); }
 
 function expectedChoice(question) {
   return question.correctOptionId ?? question.correct ?? question.answer;
@@ -41,48 +54,49 @@ function evidenceFor(question, difficulty) {
   const raw = question.evidence?.[difficulty] ?? question.evidence?.[difficulty.toLowerCase()] ?? question.evidence ?? [];
   if (Array.isArray(raw)) return raw;
   if (typeof raw === 'string') return [{ type: 'note', label: 'EVIDENCE', value: raw }];
-  if (raw && typeof raw === 'object') return Object.entries(raw).map(([label, value]) => ({ type: 'note', label, value }));
+  if (raw && typeof raw === 'object') {
+    return Object.entries(raw).map(([label, value]) => ({ type: 'note', label, value }));
+  }
   return [];
 }
 
 function explanationFor(question, choice = null) {
-  const selectedOption = (question.options ?? []).find((option) => optionId(option) === choice);
-  return safeText(selectedOption?.feedback ?? question.explanation ?? question.takeaway ?? question.rationale ?? question.feedback);
+  const selected = (question.options ?? []).find((option) => optionId(option) === choice);
+  return safeText(selected?.feedback ?? question.explanation ?? question.takeaway ?? question.rationale ?? question.feedback);
 }
 
 function publicQuestion(question, difficulty, action = null) {
-  const feedback = action ? {
-    correct: action.correct,
-    explanation: explanationFor(question, action.choice),
-    correctOptionId: expectedChoice(question),
-  } : null;
   return {
     id: question.id,
+    taskId: question.id,
     category: question.category ?? 'general',
+    topic: question.topic ?? null,
     question: questionPrompt(question),
     evidence: evidenceFor(question, difficulty),
     options: (question.options ?? []).map((option) => ({
       id: optionId(option),
       label: optionLabel(option),
-      technical: typeof option === 'object' ? safeText(option.technical ?? option.detail ?? option.description) : '',
+      technical: typeof option === 'object'
+        ? safeText(option.technical ?? option.detail ?? option.description)
+        : '',
     })),
     racePhase: question.racePhase,
     gridPosition: question.gridPosition,
     selected: action?.choice ?? null,
-    feedback,
+    feedback: action ? {
+      correct: action.correct,
+      explanation: explanationFor(question, action.choice),
+      correctOptionId: expectedChoice(question),
+    } : null,
   };
 }
 
-function trendRank(secret, namespace, cardId) {
-  return createHmac('sha256', secret).update(`${namespace}\u0000${cardId}`).digest('hex');
+function hmacHex(secret, namespace, value) {
+  return createHmac('sha256', secret).update(`${namespace}\u0000${value}`).digest('hex');
 }
 
-function selectTrendCards(secret, ordinal, trackId) {
-  return [...TREND_CARDS]
-    .map((card) => ({ card, rank: trendRank(secret, `${ordinal}:${trackId}`, card.id) }))
-    .sort((left, right) => left.rank.localeCompare(right.rank))
-    .slice(0, 2)
-    .map(({ card }) => card);
+function deterministicUnit(secret, namespace, value) {
+  return Number.parseInt(hmacHex(secret, namespace, value).slice(0, 13), 16) / 0xfffffffffffff;
 }
 
 function publicTrend(card) {
@@ -96,86 +110,103 @@ function publicTrend(card) {
   };
 }
 
-function raceEffect(phase, correct, score) {
-  if (!correct) return '보너스가 적용되지 않았습니다. 근거를 복기하고 다음 구간을 준비하세요.';
-  if (phase === 'LAUNCH') return 'LAUNCH BOOST 활성화';
-  if (phase === 'SECTOR_1') return `NITRO ${score.nitro}/3 충전`;
-  if (phase === 'PIT_STOP') return `FAST PIT ${(score.pitTimeMs / 1_000).toFixed(1)}초`;
-  if (phase === 'SECTOR_2') return score.aeroActive ? 'AERO BOOST 활성화' : 'AERO 검증 1/2 통과';
-  if (phase === 'SPRINT') return score.nitroDeploy ? 'NITRO DEPLOY 활성화' : '스프린트 판단 통과';
-  return '보안 판단 보너스 적용';
+function assertTiming(timing) {
+  const positive = ['minWaitMs', 'maxWaitMs', 'gridMs', 'encounterMs', 'minimumExposureMs', 'resultMs'];
+  for (const field of positive) {
+    if (!Number.isInteger(timing[field]) || timing[field] <= 0) throw new Error(`${field} must be a positive integer`);
+  }
+  if (timing.maxWaitMs < timing.minWaitMs) throw new Error('maxWaitMs must be greater than or equal to minWaitMs');
+  if (timing.minimumExposureMs > timing.encounterMs) {
+    throw new Error('minimumExposureMs must not exceed encounterMs');
+  }
+}
+
+function raceEffect(question, correct, score) {
+  if (!correct) return '추가 페이스가 적용되지 않았습니다. 근거를 복기하고 다음 구간을 준비하세요.';
+  if (question.racePhase === 'LAUNCH') return 'LAUNCH BOOST 활성화';
+  if (question.racePhase === 'PIT_STOP') return `FAST PIT ${(score.pitTimeMs / 1_000).toFixed(2)}초`;
+  if (question.racePhase === 'SPRINT') return 'FINAL ATTACK 준비 완료';
+  return score.boostMode
+    ? `BATTERY ${score.batteryPercent}% · BOOST 준비`
+    : `BATTERY ${score.batteryPercent}% · RECHARGE`;
 }
 
 export class GameStore {
   constructor({
-    now = () => Date.now(), roundMs = PRODUCTION_ROUND_MS, epochMs = 0, maxPlayers = 48,
-    sessionTtlMs = 15 * 60_000, seedSecret = randomBytes(32).toString('hex'),
-    questionBank = QUESTION_BANK, questionBankVersion = QUESTION_BANK_VERSION ?? '1',
+    now = () => Date.now(),
+    roundMs = PRODUCTION_ROUND_MS,
+    matchMinWaitMs,
+    matchMaxWaitMs,
+    gridMs,
+    encounterMs,
+    minimumExposureMs,
+    resultMs,
+    maxPlayers = 48,
+    sessionTtlMs = 15 * 60_000,
+    seedSecret = randomBytes(32).toString('hex'),
+    questionBank = QUESTION_BANK,
+    questionBankVersion = QUESTION_BANK_VERSION ?? '1',
   } = {}) {
-    if (!Array.isArray(questionBank) || questionBank.length < 7) throw new Error('question bank is incomplete');
+    const scaled = scaledMatchTiming(roundMs);
+    const timing = Object.freeze({
+      ...scaled,
+      minWaitMs: matchMinWaitMs ?? scaled.minWaitMs,
+      maxWaitMs: matchMaxWaitMs ?? scaled.maxWaitMs,
+      gridMs: gridMs ?? scaled.gridMs,
+      encounterMs: encounterMs ?? scaled.encounterMs,
+      minimumExposureMs: minimumExposureMs ?? scaled.minimumExposureMs,
+      resultMs: resultMs ?? scaled.resultMs,
+      seats: HEAT_SIZE,
+      totalEncounters: TOTAL_ENCOUNTERS,
+      totalLaps: TOTAL_LAPS,
+    });
+    assertTiming(timing);
+    if (!Number.isInteger(maxPlayers) || maxPlayers < HEAT_SIZE || maxPlayers > 48) {
+      throw new Error('maxPlayers must be an integer between 4 and 48');
+    }
+    if (!Array.isArray(questionBank) || questionBank.length < TOTAL_ENCOUNTERS) {
+      throw new Error('question bank must contain at least ten questions');
+    }
     if (!Array.isArray(TREND_CARDS) || TREND_CARDS.length < 2) throw new Error('trend card bank is incomplete');
     Object.assign(this, {
-      now, roundMs, epochMs, maxPlayers, sessionTtlMs, seedSecret,
-      questionBank, questionBankVersion,
+      now,
+      roundMs,
+      timing,
+      maxPlayers,
+      sessionTtlMs,
+      seedSecret,
+      questionBank,
+      questionBankVersion,
     });
     this.players = new Map();
     this.devices = new Map();
-    this.rounds = new Map();
-    this.stats = { races: 0, finishes: 0, perfectLaps: 0, totalCorrect: 0, totalAnswers: 0 };
+    this.matches = new Map();
+    this.nextMatchIndex = 1;
+    this.stats = {
+      heats: 0,
+      humanFinishes: 0,
+      aiFilledSeats: 0,
+      perfectLaps: 0,
+      totalCorrect: 0,
+      totalAnswers: 0,
+    };
   }
 
-  currentClock() { return clockAt(this.now(), { roundMs: this.roundMs, epochMs: this.epochMs }); }
-  phaseSpec(phase) { return phaseBounds(this.roundMs).find((value) => value.id === phase); }
-  joinCutoffMs() { return this.phaseSpec('JOIN').endMs; }
-  minimumExposureMs() { return Math.max(50, Math.round((3_000 / PRODUCTION_ROUND_MS) * this.roundMs)); }
-
-  renewPlayer(player) {
-    const now = this.now();
-    player.lastSeen = now;
-    player.expiresAt = Math.min(now + this.sessionTtlMs, player.hardExpiresAt ?? Number.POSITIVE_INFINITY);
+  fail(code) {
+    const error = new Error(code);
+    error.code = code;
+    throw error;
   }
 
-  getRound(ordinal, trackId) {
-    const track = getTrack(trackId);
-    const key = roundKey(ordinal, track.id);
-    if (!this.rounds.has(key)) {
-      const startedAt = this.epochMs + ordinal * this.roundMs;
-      this.rounds.set(key, {
-        key,
-        id: publicRoundId(ordinal, track.id),
-        ordinal,
-        trackId: track.id,
-        track,
-        deck: buildRaceDeck(
-          this.questionBank.filter((question) => !Array.isArray(question.tracks) || question.tracks.includes(track.id)),
-          {
-          ordinal,
-          trackId: track.id,
-          version: this.questionBankVersion,
-          secret: this.seedSecret,
-          },
-        ),
-        trendCards: selectTrendCards(this.seedSecret, ordinal, track.id),
-        players: new Set(),
-        actions: new Map(),
-        actionIds: new Map(),
-        phase: 'JOIN',
-        phaseStartedAt: startedAt,
-        phaseEndsAt: startedAt + this.joinCutoffMs(),
-        finalized: false,
-      });
-    }
-    return this.rounds.get(key);
-  }
-
-  roundsForOrdinal(ordinal) { return TRACKS.map(({ id: trackId }) => this.getRound(ordinal, trackId)); }
-
-  playersIn(round) {
-    return [...round.players].map((playerToken) => this.players.get(playerToken)).filter(Boolean);
-  }
-
-  ordinalPlayerCount(ordinal) {
-    return this.roundsForOrdinal(ordinal).reduce((count, round) => count + round.players.size, 0);
+  currentClock() {
+    const active = [...this.matches.values()]
+      .filter(({ status }) => status !== 'COMPLETE')
+      .sort((left, right) => left.index - right.index)[0] ?? null;
+    return {
+      roundId: active?.id ?? null,
+      matchId: active?.id ?? null,
+      phase: active?.status ?? 'IDLE',
+    };
   }
 
   makeCallsign() {
@@ -186,191 +217,591 @@ export class GameStore {
     return `RACER-${randomBytes(3).toString('hex').toUpperCase()}`;
   }
 
-  join(existingToken = null, requestedDeviceId = null, trackId = null, difficulty = null, crewId = null, driverId = null) {
-    this.cleanup();
-    if (existingToken && this.players.has(existingToken)) {
-      const existing = this.players.get(existingToken);
-      this.renewPlayer(existing);
-      return this.identity(existing);
-    }
-
-    const deviceId = requestedDeviceId ?? id('device');
-    const deviceToken = this.devices.get(deviceId);
-    if (deviceToken && this.players.has(deviceToken)) {
-      const existing = this.players.get(deviceToken);
-      const clock = clockForOrdinal(existing.roundOrdinal, this.now(), {
-        roundMs: this.roundMs, epochMs: this.epochMs,
-      });
-      if (clock.phase !== 'COMPLETE') {
-        this.renewPlayer(existing);
-        return this.identity(existing);
-      }
-    }
-
-    const track = getTrack(trackId);
-    const selectedDifficulty = validateDifficulty(difficulty);
-    const crew = getCrew(crewId);
-    const driver = getDriver(driverId);
-    if (driver.crewId !== crew.id) this.fail('invalid_driver');
-    const current = this.currentClock();
-    let ordinal = current.elapsedMs < this.joinCutoffMs() ? current.ordinal : current.ordinal + 1;
-    if (this.ordinalPlayerCount(ordinal) >= this.maxPlayers) ordinal = current.ordinal + 1;
-    if (this.ordinalPlayerCount(ordinal) >= this.maxPlayers) this.fail('capacity');
-
-    const round = this.getRound(ordinal, track.id);
-    const playerToken = token();
+  createMatch() {
+    const index = this.nextMatchIndex;
+    this.nextMatchIndex += 1;
+    const circuit = CIRCUITS[(index - 1) % CIRCUITS.length];
     const createdAt = this.now();
-    const roundEndsAt = this.epochMs + (ordinal + 1) * this.roundMs;
-    const hardExpiresAt = roundEndsAt + Math.min(this.sessionTtlMs, this.roundMs * 3);
-    const player = {
-      id: id('p'),
-      token: playerToken,
-      callsign: this.makeCallsign(),
-      roundOrdinal: ordinal,
-      trackId: track.id,
-      difficulty: selectedDifficulty,
-      crewId: crew.id,
-      driverId: driver.id,
-      deviceId,
+    const matchId = `heat_${String(index).padStart(4, '0')}`;
+    const trendCards = [...TREND_CARDS]
+      .map((card) => ({ card, rank: hmacHex(this.seedSecret, `trend:${matchId}`, card.id) }))
+      .sort((left, right) => left.rank.localeCompare(right.rank))
+      .slice(0, 2)
+      .map(({ card }) => card);
+    const match = {
+      id: matchId,
+      index,
+      circuit,
       createdAt,
-      lastSeen: createdAt,
-      expiresAt: Math.min(createdAt + this.sessionTtlMs, hardExpiresAt),
-      hardExpiresAt,
+      minStartAt: createdAt + this.timing.minWaitMs,
+      maxStartAt: createdAt + this.timing.maxWaitMs,
+      filledAt: null,
+      status: 'MATCHING',
+      statusStartedAt: createdAt,
+      phaseEndsAt: createdAt + this.timing.maxWaitMs,
+      humanTokens: [],
+      racers: [],
+      deck: buildRaceDeck(this.questionBank, {
+        matchId,
+        circuitId: circuit.id,
+        version: this.questionBankVersion,
+        secret: this.seedSecret,
+      }),
+      trendCards,
+      actions: new Map(),
+      actionIds: new Map(),
+      encounterIndex: -1,
+      encounterStartedAt: null,
+      encounterEndsAt: null,
+      resultEndsAt: null,
+      completedAt: null,
+      finalized: false,
     };
-    this.players.set(playerToken, player);
-    this.devices.set(deviceId, playerToken);
-    round.players.add(playerToken);
-    return this.identity(player);
+    this.matches.set(match.id, match);
+    return match;
+  }
+
+  matchForPlayer(player) {
+    const match = this.matches.get(player.matchId);
+    if (!match) this.fail('unauthorized');
+    return match;
+  }
+
+  playersIn(match) {
+    return match.humanTokens.map((playerToken) => this.players.get(playerToken)).filter(Boolean);
+  }
+
+  activeHumanCount() {
+    return [...this.matches.values()]
+      .filter(({ status }) => status !== 'COMPLETE')
+      .reduce((total, match) => total + match.humanTokens.length, 0);
+  }
+
+  openMatch() {
+    return [...this.matches.values()]
+      .filter((match) => match.status === 'MATCHING' && match.humanTokens.length < HEAT_SIZE)
+      .sort((left, right) => left.index - right.index)[0] ?? null;
+  }
+
+  renewPlayer(player) {
+    const at = this.now();
+    player.lastSeen = at;
+    player.expiresAt = Math.min(at + this.sessionTtlMs, player.hardExpiresAt);
   }
 
   identity(player) {
-    const round = this.getRound(player.roundOrdinal, player.trackId);
+    const match = this.matchForPlayer(player);
     return {
       token: player.token,
-      roundId: round.id,
+      matchId: match.id,
+      roundId: match.id,
       callsign: player.callsign,
-      trackId: player.trackId,
+      circuitId: match.circuit.id,
       difficulty: player.difficulty,
       crewId: player.crewId,
       driverId: player.driverId,
     };
   }
 
+  join(existingToken = null, requestedDeviceId = null, difficulty = null, crewId = null, driverId = null) {
+    this.advanceAll();
+    this.cleanup();
+    const at = this.now();
+    const existing = existingToken ? this.players.get(existingToken) : null;
+    if (existing && existing.hardExpiresAt > at && this.matchForPlayer(existing).status !== 'COMPLETE') {
+      this.renewPlayer(existing);
+      return this.identity(existing);
+    }
+
+    const deviceId = requestedDeviceId ?? randomId('device');
+    const remembered = this.players.get(this.devices.get(deviceId));
+    if (remembered && remembered.hardExpiresAt > at && this.matchForPlayer(remembered).status !== 'COMPLETE') {
+      this.renewPlayer(remembered);
+      return this.identity(remembered);
+    }
+
+    const selectedDifficulty = validateDifficulty(difficulty);
+    const crew = getCrew(crewId);
+    const driver = getDriver(driverId);
+    if (driver.crewId !== crew.id) this.fail('invalid_driver');
+    if (this.activeHumanCount() >= this.maxPlayers) this.fail('capacity');
+
+    const match = this.openMatch() ?? this.createMatch();
+    const playerToken = token();
+    const retentionMs = Math.max(this.sessionTtlMs, this.roundMs * 3);
+    const hardExpiresAt = match.createdAt + maximumHeatRuntime(this.timing) + retentionMs;
+    const player = {
+      id: randomId('p'),
+      token: playerToken,
+      callsign: this.makeCallsign(),
+      matchId: match.id,
+      difficulty: selectedDifficulty,
+      crewId: crew.id,
+      driverId: driver.id,
+      deviceId,
+      createdAt: at,
+      lastSeen: at,
+      expiresAt: Math.min(at + this.sessionTtlMs, hardExpiresAt),
+      hardExpiresAt,
+    };
+    this.players.set(playerToken, player);
+    this.devices.set(deviceId, playerToken);
+    match.humanTokens.push(playerToken);
+    if (match.humanTokens.length === HEAT_SIZE) {
+      match.filledAt = at;
+      if (at >= match.minStartAt) this.enterGrid(match, at);
+    }
+    return this.identity(player);
+  }
+
   requirePlayer(playerToken) {
     const player = this.players.get(playerToken);
-    if (!player || player.expiresAt <= this.now()) this.fail('unauthorized');
+    if (!player || player.expiresAt <= this.now() || player.hardExpiresAt <= this.now()) this.fail('unauthorized');
     this.renewPlayer(player);
     return player;
   }
 
-  questionsForPhase(round, phase) {
-    return TASK_PHASES.has(phase) ? round.deck.filter((question) => question.racePhase === phase) : [];
-  }
-
-  requiredKeys(round, phase) {
-    const questions = this.questionsForPhase(round, phase);
-    return this.playersIn(round).flatMap((player) => questions.map((question) => `${player.id}:${question.id}`));
-  }
-
-  phaseComplete(round) {
-    const keys = this.requiredKeys(round, round.phase);
-    return keys.length > 0 && keys.every((key) => round.actions.has(key));
-  }
-
-  roundClock(round) {
-    const global = clockForOrdinal(round.ordinal, this.now(), { roundMs: this.roundMs, epochMs: this.epochMs });
-    if (global.phase === 'QUEUED' || global.phase === 'COMPLETE') return global;
-    const phaseIndex = Math.max(0, ACTIVE_PHASES.indexOf(round.phase));
+  humanRacer(player, seat) {
     return {
-      ...global,
-      roundId: round.id,
-      phase: round.phase,
-      phaseStartedAt: round.phaseStartedAt,
-      phaseEndsAt: round.phaseEndsAt,
-      phaseRemainingMs: Math.max(0, round.phaseEndsAt - this.now()),
-      progress: round.phase === 'RESULT' ? 1 : Math.max(global.progress, (phaseIndex + 1) / (ACTIVE_PHASES.length + 1)),
-      mayAdvanceEarly: TASK_PHASES.has(round.phase),
+      id: player.id,
+      playerId: player.id,
+      callsign: player.callsign,
+      isAi: false,
+      difficulty: player.difficulty,
+      crewId: player.crewId,
+      driverId: player.driverId,
+      seat,
+      aiResults: null,
+      aiSkill: null,
     };
   }
 
-  trendFor(round, phase) {
-    if (phase === 'PIT_STOP') return publicTrend(round.trendCards[0]);
-    if (phase === 'RESULT' || phase === 'COMPLETE') return publicTrend(round.trendCards[1]);
+  aiRacer(match, seat, usedDriverIds) {
+    const rankedDrivers = DRIVERS
+      .filter(({ id }) => !usedDriverIds.has(id))
+      .map((driver) => ({
+        driver,
+        rank: hmacHex(this.seedSecret, `ai-driver:${match.id}:${seat}`, driver.id),
+      }))
+      .sort((left, right) => left.rank.localeCompare(right.rank));
+    const driver = rankedDrivers[0]?.driver ?? DRIVERS[seat % DRIVERS.length];
+    usedDriverIds.add(driver.id);
+    const skill = 0.58 + deterministicUnit(this.seedSecret, 'ai-skill', `${match.id}:${seat}`) * 0.24;
+    return {
+      id: `ai_${String(match.index).padStart(4, '0')}_${seat + 1}`,
+      playerId: null,
+      callsign: `${AI_NAMES[(seat - match.humanTokens.length) % AI_NAMES.length]}-${String(match.index).padStart(2, '0')}`,
+      isAi: true,
+      difficulty: 'AI',
+      crewId: driver.crewId,
+      driverId: driver.id,
+      seat,
+      aiSkill: Math.round(skill * 100) / 100,
+      aiResults: match.deck.map((question, questionIndex) => (
+        deterministicUnit(this.seedSecret, 'ai-answer', `${match.id}:${seat}:${question.id}:${questionIndex}`) < skill
+      )),
+    };
+  }
+
+  enterGrid(match, startedAt) {
+    if (match.status !== 'MATCHING') return;
+    const humans = this.playersIn(match).map((player, seat) => this.humanRacer(player, seat));
+    const usedDriverIds = new Set(humans.map(({ driverId }) => driverId));
+    const racers = [...humans];
+    while (racers.length < HEAT_SIZE) racers.push(this.aiRacer(match, racers.length, usedDriverIds));
+    match.racers = racers;
+    match.status = 'GRID';
+    match.statusStartedAt = startedAt;
+    match.phaseEndsAt = startedAt + this.timing.gridMs;
+    this.stats.aiFilledSeats += racers.filter(({ isAi }) => isAi).length;
+  }
+
+  enterRace(match, startedAt) {
+    match.status = 'RACING';
+    match.statusStartedAt = startedAt;
+    match.encounterIndex = 0;
+    match.encounterStartedAt = startedAt;
+    match.encounterEndsAt = startedAt + this.timing.encounterMs;
+    match.phaseEndsAt = match.encounterEndsAt;
+  }
+
+  enterResult(match, startedAt) {
+    match.status = 'RESULT';
+    match.statusStartedAt = startedAt;
+    match.encounterIndex = TOTAL_ENCOUNTERS;
+    match.encounterStartedAt = null;
+    match.encounterEndsAt = null;
+    match.resultEndsAt = startedAt + this.timing.resultMs;
+    match.phaseEndsAt = match.resultEndsAt;
+    this.finalize(match);
+  }
+
+  completeMatch(match, completedAt) {
+    match.status = 'COMPLETE';
+    match.statusStartedAt = completedAt;
+    match.phaseEndsAt = completedAt;
+    match.completedAt = completedAt;
+  }
+
+  currentQuestion(match) {
+    return match.status === 'RACING' ? match.deck[match.encounterIndex] ?? null : null;
+  }
+
+  allHumansAnswered(match) {
+    const question = this.currentQuestion(match);
+    if (!question) return false;
+    return match.racers
+      .filter(({ isAi }) => !isAi)
+      .every((racer) => match.actions.has(`${racer.playerId}:${question.id}`));
+  }
+
+  advanceMatch(match) {
+    const at = this.now();
+    if (match.status === 'MATCHING') {
+      if (match.humanTokens.length === HEAT_SIZE && at >= match.minStartAt) {
+        this.enterGrid(match, Math.max(match.minStartAt, match.filledAt ?? match.minStartAt));
+        return true;
+      }
+      if (at >= match.maxStartAt) {
+        this.enterGrid(match, match.maxStartAt);
+        return true;
+      }
+      return false;
+    }
+    if (match.status === 'GRID') {
+      if (at < match.phaseEndsAt) return false;
+      this.enterRace(match, match.phaseEndsAt);
+      return true;
+    }
+    if (match.status === 'RACING') {
+      const exposed = at >= match.encounterStartedAt + this.timing.minimumExposureMs;
+      const deadline = at >= match.encounterEndsAt;
+      const completedEarly = exposed && this.allHumansAnswered(match);
+      if (!deadline && !completedEarly) return false;
+      const nextStartedAt = deadline ? match.encounterEndsAt : at;
+      if (match.encounterIndex >= TOTAL_ENCOUNTERS - 1) {
+        this.enterResult(match, nextStartedAt);
+      } else {
+        match.encounterIndex += 1;
+        match.encounterStartedAt = nextStartedAt;
+        match.encounterEndsAt = nextStartedAt + this.timing.encounterMs;
+        match.phaseEndsAt = match.encounterEndsAt;
+      }
+      return true;
+    }
+    if (match.status === 'RESULT') {
+      if (at < match.resultEndsAt) return false;
+      this.completeMatch(match, match.resultEndsAt);
+      return true;
+    }
+    return false;
+  }
+
+  advanceAll() {
+    for (const match of this.matches.values()) {
+      for (let step = 0; step < 32; step += 1) {
+        if (!this.advanceMatch(match)) break;
+      }
+    }
+  }
+
+  async tick() {
+    this.advanceAll();
+    this.cleanup();
+  }
+
+  scoreForRacer(match, racer, completedCount = TOTAL_ENCOUNTERS) {
+    const revealed = clamp(completedCount, 0, TOTAL_ENCOUNTERS);
+    if (racer.isAi) {
+      const results = match.deck.map((_, index) => index < revealed && racer.aiResults[index] === true);
+      return scoreFromResults(match.deck, results, revealed, revealed);
+    }
+    const results = match.deck.map((question, index) => {
+      if (index >= revealed) return false;
+      return match.actions.get(`${racer.playerId}:${question.id}`)?.correct === true;
+    });
+    const answered = match.deck.slice(0, revealed)
+      .filter((question) => match.actions.has(`${racer.playerId}:${question.id}`)).length;
+    return scoreFromResults(match.deck, results, answered, revealed);
+  }
+
+  provisionalRacers(match) {
+    return match.racers.length > 0
+      ? match.racers
+      : this.playersIn(match).map((player, seat) => this.humanRacer(player, seat));
+  }
+
+  raceSnapshot(match) {
+    const at = this.now();
+    const completedCount = match.status === 'RACING'
+      ? match.encounterIndex
+      : ['RESULT', 'COMPLETE'].includes(match.status) ? TOTAL_ENCOUNTERS : 0;
+    const fraction = match.status === 'RACING'
+      ? clamp((at - match.encounterStartedAt) / this.timing.encounterMs, 0, 1)
+      : 0;
+    const baseProgress = match.status === 'RACING'
+      ? ((match.encounterIndex + fraction) / TOTAL_ENCOUNTERS) * 0.94
+      : ['RESULT', 'COMPLETE'].includes(match.status) ? 1 : 0;
+    const modeled = this.provisionalRacers(match).map((racer) => {
+      const score = this.scoreForRacer(match, racer, completedCount);
+      const performance = score.correct * 0.005 + score.streak * 0.0015
+        + (score.launchBoost ? 0.003 : 0)
+        + (completedCount > 5 && score.pitTimeMs <= 2_100 ? 0.003 : 0);
+      const progress = ['RESULT', 'COMPLETE'].includes(match.status)
+        ? 1
+        : clamp(baseProgress + performance, 0, 0.995);
+      const rankValue = ['RESULT', 'COMPLETE'].includes(match.status)
+        ? 1 + score.correct * 0.004 + score.streak * 0.0002 + (4_500 - score.pitTimeMs) / 1_000_000
+        : progress;
+      return { racer, score, progress, rankValue };
+    }).sort((left, right) => (
+      right.rankValue - left.rankValue
+      || right.score.correct - left.score.correct
+      || left.score.pitTimeMs - right.score.pitTimeMs
+      || left.racer.seat - right.racer.seat
+    ));
+
+    const leader = modeled[0] ?? null;
+    return modeled.map((entry, index) => {
+      const { racer, score, progress, rankValue } = entry;
+      const position = index + 1;
+      const gapProgress = leader ? Math.max(0, leader.rankValue - rankValue) : 0;
+      const finished = ['RESULT', 'COMPLETE'].includes(match.status);
+      const lap = finished ? TOTAL_LAPS : progress >= 0.5 ? 2 : 1;
+      const trackProgress = finished ? 1 : (progress * TOTAL_LAPS) % 1;
+      const zoneIndex = Math.min(
+        match.circuit.speedZones.length - 1,
+        Math.floor(trackProgress * match.circuit.speedZones.length),
+      );
+      const baseSpeed = match.circuit.speedZones[zoneIndex] ?? match.circuit.speedRangeKph.min;
+      const batteryPercent = clamp(
+        Math.round(score.batteryPercent - progress * 14 + score.correct * 2),
+        0,
+        100,
+      );
+      const boostMode = match.status === 'RACING' && score.boostMode && batteryPercent >= 25;
+      const oneSecondProgressGap = clamp(
+        1_000 / (this.timing.encounterMs * TOTAL_ENCOUNTERS),
+        0.004,
+        0.02,
+      );
+      const overtakeMode = match.status === 'RACING'
+        && position > 1
+        && progress >= 0.45
+        && gapProgress <= oneSecondProgressGap
+        && batteryPercent >= 20;
+      const speedKph = match.status === 'RACING'
+        ? Math.round(clamp(
+          baseSpeed + (boostMode ? 8 : 0) + (overtakeMode ? 7 : 0),
+          match.circuit.speedRangeKph.min,
+          match.circuit.speedRangeKph.max,
+        ))
+        : 0;
+      const activeAero = match.status === 'RACING'
+        && speedKph >= match.circuit.speedRangeKph.min
+          + (match.circuit.speedRangeKph.max - match.circuit.speedRangeKph.min) * 0.62;
+      const gapMeters = index === 0 ? 0 : Math.round(
+        gapProgress * match.circuit.officialLengthKm * 1_000 * TOTAL_LAPS,
+      );
+      return {
+        id: racer.id,
+        callsign: racer.callsign,
+        isAi: racer.isAi,
+        crewId: racer.crewId,
+        crewName: getCrew(racer.crewId).name,
+        driverId: racer.driverId,
+        driverName: getDriver(racer.driverId).name,
+        position,
+        lap,
+        totalLaps: TOTAL_LAPS,
+        progress: Math.round(progress * 10_000) / 10_000,
+        trackProgress: Math.round(trackProgress * 10_000) / 10_000,
+        speedKph,
+        gapMeters,
+        batteryPercent,
+        boostMode,
+        overtakeMode,
+        activeAero,
+        pitTimeMs: completedCount > 5 ? score.pitTimeMs : null,
+        pit: {
+          completed: completedCount > 5,
+          timeMs: completedCount > 5 ? score.pitTimeMs : null,
+        },
+        finished,
+        score: {
+          answered: score.answered,
+          correct: score.correct,
+          possible: score.possible,
+          accuracy: score.accuracy,
+          streak: score.streak,
+        },
+      };
+    });
+  }
+
+  trendFor(match) {
+    if (['RESULT', 'COMPLETE'].includes(match.status)) return publicTrend(match.trendCards[1]);
+    if (match.status === 'RACING' && match.encounterIndex >= 5) return publicTrend(match.trendCards[0]);
     return null;
   }
 
-  state(playerToken) {
-    const player = this.requirePlayer(playerToken);
-    const round = this.getRound(player.roundOrdinal, player.trackId);
-    const clock = this.roundClock(round);
-    const tasks = this.questionsForPhase(round, clock.phase).map((question) => {
-      const action = round.actions.get(`${player.id}:${question.id}`) ?? null;
-      return publicQuestion(question, player.difficulty, action);
-    });
-    const observations = round.deck
-      .map((question) => ({ question, action: round.actions.get(`${player.id}:${question.id}`) ?? null }))
-      .filter(({ action }) => action)
-      .map(({ question, action }) => ({
+  publicMatchState(match) {
+    const at = this.now();
+    const humanCount = match.humanTokens.length;
+    const aiCount = match.racers.filter(({ isAi }) => isAi).length;
+    const startsInMs = match.status === 'MATCHING'
+      ? Math.max(0, (humanCount === HEAT_SIZE ? match.minStartAt : match.maxStartAt) - at)
+      : match.status === 'GRID' ? Math.max(0, match.phaseEndsAt - at) : 0;
+    return {
+      id: match.id,
+      matchId: match.id,
+      status: match.status,
+      humanCount,
+      aiCount,
+      seats: HEAT_SIZE,
+      minWaitRemainingMs: match.status === 'MATCHING' ? Math.max(0, match.minStartAt - at) : 0,
+      maxWaitRemainingMs: match.status === 'MATCHING' ? Math.max(0, match.maxStartAt - at) : 0,
+      startsInMs,
+      encounterIndex: match.status === 'RACING'
+        ? match.encounterIndex
+        : ['MATCHING', 'GRID'].includes(match.status) ? -1 : TOTAL_ENCOUNTERS,
+      encounterNumber: match.status === 'RACING' ? match.encounterIndex + 1 : 0,
+      totalEncounters: TOTAL_ENCOUNTERS,
+      encounterRemainingMs: match.status === 'RACING' ? Math.max(0, match.encounterEndsAt - at) : 0,
+      minimumExposureMs: this.timing.minimumExposureMs,
+      circuit: match.circuit,
+    };
+  }
+
+  roundAlias(match) {
+    const state = this.publicMatchState(match);
+    const remainingMs = state.status === 'MATCHING'
+      ? state.maxWaitRemainingMs
+      : state.status === 'GRID' ? state.startsInMs
+        : state.status === 'RACING' ? state.encounterRemainingMs
+          : state.status === 'RESULT' ? Math.max(0, match.resultEndsAt - this.now()) : 0;
+    const raceProgress = state.status === 'RACING'
+      ? (match.encounterIndex + clamp((this.now() - match.encounterStartedAt) / this.timing.encounterMs, 0, 1)) / TOTAL_ENCOUNTERS
+      : ['RESULT', 'COMPLETE'].includes(state.status) ? 1 : 0;
+    return {
+      roundId: match.id,
+      matchId: match.id,
+      phase: match.status,
+      phaseRemainingMs: remainingMs,
+      remainingMs,
+      progress: Math.round(raceProgress * 10_000) / 10_000,
+      counts: { total: HEAT_SIZE, human: state.humanCount, ai: state.aiCount },
+      maxPlayers: HEAT_SIZE,
+    };
+  }
+
+  observationsFor(match, player) {
+    return match.deck.flatMap((question) => {
+      const action = match.actions.get(`${player.id}:${question.id}`);
+      if (!action) return [];
+      const selected = (question.options ?? []).find((option) => optionId(option) === action.choice);
+      return [{
         taskId: question.id,
         phase: question.racePhase,
         choice: action.choice,
-        label: optionLabel((question.options ?? []).find((option) => optionId(option) === action.choice) ?? action.choice),
+        label: selected ? optionLabel(selected) : action.choice,
         correct: action.correct,
         explanation: explanationFor(question, action.choice),
-      }));
-    const score = raceScore(round.deck, round.actions, player.id);
-    const current = this.currentClock();
+      }];
+    });
+  }
+
+  state(playerToken) {
+    this.advanceAll();
+    this.cleanup();
+    const player = this.requirePlayer(playerToken);
+    const match = this.matchForPlayer(player);
+    const currentQuestion = this.currentQuestion(match);
+    const currentAction = currentQuestion
+      ? match.actions.get(`${player.id}:${currentQuestion.id}`) ?? null
+      : null;
+    const tasks = currentQuestion ? [publicQuestion(currentQuestion, player.difficulty, currentAction)] : [];
+    const racers = this.raceSnapshot(match);
+    const playerRace = racers.find(({ id }) => id === player.id) ?? null;
+    const score = raceScore(match.deck, match.actions, player.id);
+    const matchState = this.publicMatchState(match);
     return {
-      track: round.track,
+      circuit: match.circuit,
       player: {
+        id: player.id,
+        racerId: player.id,
         callsign: player.callsign,
-        trackId: player.trackId,
         difficulty: player.difficulty,
         crewId: player.crewId,
         driverId: player.driverId,
         crew: getCrew(player.crewId),
         driver: getDriver(player.driverId),
       },
-      round: {
-        ...clock,
-        counts: { total: round.players.size },
-        maxPlayers: this.maxPlayers,
-      },
+      match: matchState,
+      round: this.roundAlias(match),
       tasks,
-      observations,
-      race: score,
-      trend: this.trendFor(round, clock.phase),
-      queue: clock.phase === 'QUEUED' ? {
-        currentPhase: current.phase,
-        currentRemainingMs: current.remainingMs,
-        selectedTrack: player.trackId,
-        nextCounts: { total: round.players.size },
-      } : null,
-      result: ['RESULT', 'COMPLETE'].includes(clock.phase) ? this.publicResult(round, player) : null,
+      observations: this.observationsFor(match, player),
+      trend: this.trendFor(match),
+      race: {
+        ...(playerRace ?? {
+          id: player.id,
+          callsign: player.callsign,
+          isAi: false,
+          position: 1,
+          lap: 1,
+          totalLaps: TOTAL_LAPS,
+          progress: 0,
+          trackProgress: 0,
+          speedKph: 0,
+          gapMeters: 0,
+          batteryPercent: score.batteryPercent,
+          boostMode: false,
+          overtakeMode: false,
+          activeAero: false,
+          pitTimeMs: score.pitTimeMs,
+          pit: { completed: false, timeMs: null },
+          finished: false,
+        }),
+        answered: score.answered,
+        correct: score.correct,
+        possible: score.possible,
+        accuracy: score.accuracy,
+        streak: score.streak,
+        racers,
+      },
+      result: ['RESULT', 'COMPLETE'].includes(match.status) ? this.publicResult(match, player, racers) : null,
     };
   }
 
-  submit(playerToken, { roundId, task, choice, actionId }) {
+  submit(playerToken, payload = {}) {
+    this.advanceAll();
+    this.cleanup();
     const player = this.requirePlayer(playerToken);
-    const round = this.getRound(player.roundOrdinal, player.trackId);
-    if (roundId !== round.id) this.fail('wrong_round');
-    if (!/^[a-zA-Z0-9_-]{8,80}$/.test(actionId ?? '')) this.fail('invalid_action_id');
+    const match = this.matchForPlayer(player);
+    const requestedMatchId = safeText(payload.matchId) || safeText(payload.roundId);
+    const task = safeText(payload.task);
+    const choice = safeText(payload.choice);
+    const actionId = safeText(payload.actionId);
+    if (requestedMatchId !== match.id) this.fail('wrong_match');
+    if (!SAFE_ACTION_ID.test(actionId)) this.fail('invalid_action_id');
+    if (!SAFE_VALUE.test(task) || !SAFE_VALUE.test(choice)) this.fail('invalid_choice');
+
     const idempotencyKey = `${player.id}:${actionId}`;
-    const replay = round.actionIds.get(idempotencyKey);
+    const replay = match.actionIds.get(idempotencyKey);
     if (replay) {
       if (replay.task !== task || replay.choice !== choice) this.fail('idempotency_conflict');
       return { ...replay.response, duplicate: true };
     }
-    const question = round.deck.find(({ id: questionId }) => questionId === task);
-    if (!question || !(question.options ?? []).some((option) => optionId(option) === choice)) this.fail('invalid_choice');
-    const clock = this.roundClock(round);
-    if (!this.questionsForPhase(round, clock.phase).some(({ id: questionId }) => questionId === task)) this.fail('phase_closed');
+
+    const question = this.currentQuestion(match);
+    if (!question || question.id !== task) this.fail('phase_closed');
+    if (!(question.options ?? []).some((option) => optionId(option) === choice)) this.fail('invalid_choice');
     const actionKey = `${player.id}:${task}`;
-    if (round.actions.has(actionKey)) this.fail('choice_locked');
+    if (match.actions.has(actionKey)) this.fail('choice_locked');
     const correct = answerIsCorrect(question, choice);
     const action = { playerId: player.id, task, choice, correct, at: this.now() };
-    round.actions.set(actionKey, action);
-    const score = raceScore(round.deck, round.actions, player.id);
+    match.actions.set(actionKey, action);
+    const score = raceScore(match.deck, match.actions, player.id);
     const response = {
       ok: true,
       selected: choice,
@@ -378,169 +809,133 @@ export class GameStore {
         correct,
         explanation: explanationFor(question, choice),
         correctOptionId: expectedChoice(question),
-        effect: raceEffect(question.racePhase, correct, score),
+        effect: raceEffect(question, correct, score),
       },
       race: score,
     };
-    round.actionIds.set(idempotencyKey, { task, choice, response });
+    match.actionIds.set(idempotencyKey, { task, choice, response });
     return response;
   }
 
-  publicResult(round, player) {
-    const score = raceScore(round.deck, round.actions, player.id);
+  publicResult(match, player, racers = this.raceSnapshot(match)) {
+    const score = raceScore(match.deck, match.actions, player.id);
+    const playerRace = racers.find(({ id }) => id === player.id);
     return {
       outcome: finishBand(score),
       finishBand: finishBand(score),
-      ...score,
-      review: round.deck.map((question) => {
-        const action = round.actions.get(`${player.id}:${question.id}`) ?? null;
-        const selectedOption = (question.options ?? []).find((option) => optionId(option) === action?.choice);
-        const correctOption = (question.options ?? []).find((option) => optionId(option) === expectedChoice(question));
+      position: playerRace?.position ?? HEAT_SIZE,
+      circuit: match.circuit,
+      classification: racers,
+      answered: score.answered,
+      possible: score.possible,
+      correct: score.correct,
+      accuracy: score.accuracy,
+      streak: score.streak,
+      batteryPercent: playerRace?.batteryPercent ?? score.batteryPercent,
+      boostMode: playerRace?.boostMode ?? false,
+      overtakeMode: playerRace?.overtakeMode ?? false,
+      activeAero: playerRace?.activeAero ?? false,
+      pitTimeMs: score.pitTimeMs,
+      review: match.deck.map((question) => {
+        const action = match.actions.get(`${player.id}:${question.id}`) ?? null;
+        const selected = (question.options ?? []).find((option) => optionId(option) === action?.choice);
+        const correct = (question.options ?? []).find((option) => optionId(option) === expectedChoice(question));
         return {
           id: question.id,
+          taskId: question.id,
           category: question.category ?? 'general',
           question: questionPrompt(question),
           selected: action?.choice ?? null,
-          selectedLabel: selectedOption ? optionLabel(selectedOption) : null,
+          selectedLabel: selected ? optionLabel(selected) : null,
           correct: action?.correct ?? false,
           correctOptionId: expectedChoice(question),
-          correctOptionLabel: correctOption ? optionLabel(correctOption) : null,
+          correctOptionLabel: correct ? optionLabel(correct) : null,
           explanation: explanationFor(question, action?.choice),
         };
       }),
     };
   }
 
-  fail(code) {
-    const error = new Error(code);
-    error.code = code;
-    throw error;
-  }
-
-  difficultyCounts(round) {
-    const result = Object.fromEntries(DIFFICULTIES.map((difficulty) => [difficulty, 0]));
-    for (const player of this.playersIn(round)) result[player.difficulty] += 1;
-    return result;
-  }
-
-  enterPhase(round, phase, startedAt = this.now()) {
-    const spec = this.phaseSpec(phase);
-    round.phase = phase;
-    round.phaseStartedAt = startedAt;
-    round.phaseEndsAt = phase === 'RESULT'
-      ? this.epochMs + (round.ordinal + 1) * this.roundMs
-      : startedAt + (spec.endMs - spec.startMs);
-  }
-
-  finalize(round) {
-    if (round.finalized) return;
-    this.stats.races += 1;
-    for (const player of this.playersIn(round)) {
-      const score = raceScore(round.deck, round.actions, player.id);
-      this.stats.finishes += 1;
+  finalize(match) {
+    if (match.finalized) return;
+    this.stats.heats += 1;
+    for (const racer of match.racers.filter(({ isAi }) => !isAi)) {
+      const score = raceScore(match.deck, match.actions, racer.playerId);
+      this.stats.humanFinishes += 1;
       this.stats.totalCorrect += score.correct;
       this.stats.totalAnswers += score.answered;
       if (score.correct === score.possible) this.stats.perfectLaps += 1;
     }
-    round.finalized = true;
+    match.finalized = true;
   }
 
-  transitionAt(round, completed) { return completed ? this.now() : round.phaseEndsAt; }
-
-  advanceRound(round) {
-    const globalStart = this.epochMs + round.ordinal * this.roundMs;
-    const joinEndsAt = globalStart + this.joinCutoffMs();
-    if (round.phase === 'JOIN') {
-      if (this.now() < joinEndsAt || round.players.size === 0) return false;
-      this.enterPhase(round, 'LAUNCH', joinEndsAt);
-      return true;
-    }
-    if (round.phase === 'RESULT') return false;
-    const exposed = this.now() >= round.phaseStartedAt + this.minimumExposureMs();
-    const deadline = this.now() >= round.phaseEndsAt;
-    if (TASK_PHASES.has(round.phase) && ((exposed && this.phaseComplete(round)) || deadline)) {
-      const next = {
-        LAUNCH: 'SECTOR_1',
-        SECTOR_1: 'PIT_STOP',
-        PIT_STOP: 'SECTOR_2',
-        SECTOR_2: 'SPRINT',
-        SPRINT: 'RESULT',
-      }[round.phase];
-      this.enterPhase(round, next, this.transitionAt(round, exposed && this.phaseComplete(round)));
-      if (next === 'RESULT') this.finalize(round);
-      return true;
-    }
-    return false;
+  difficultyCounts(match) {
+    const counts = Object.fromEntries(DIFFICULTIES.map((difficulty) => [difficulty, 0]));
+    for (const player of this.playersIn(match)) counts[player.difficulty] += 1;
+    return counts;
   }
 
-  async tick() {
-    for (const round of this.rounds.values()) {
-      const clock = clockForOrdinal(round.ordinal, this.now(), { roundMs: this.roundMs, epochMs: this.epochMs });
-      if (clock.phase === 'QUEUED') continue;
-      for (let step = 0; step < 10; step += 1) {
-        if (!this.advanceRound(round)) break;
-      }
-    }
-    this.cleanup();
-  }
-
-  leaderboard(round) {
-    return this.playersIn(round)
-      .map((player) => ({
-        callsign: player.callsign,
-        crewId: player.crewId,
-        crewName: getCrew(player.crewId).name,
-        driverId: player.driverId,
-        difficulty: player.difficulty,
-        ...raceScore(round.deck, round.actions, player.id),
-      }))
-      .sort((left, right) => right.correct - left.correct || left.pitTimeMs - right.pitTimeMs || left.callsign.localeCompare(right.callsign));
+  heatSummary(match) {
+    const state = this.publicMatchState(match);
+    const standings = this.raceSnapshot(match);
+    return {
+      ...state,
+      difficultyCounts: this.difficultyCounts(match),
+      standings,
+      racers: standings,
+      trend: this.trendFor(match),
+    };
   }
 
   screenState() {
-    const current = this.currentClock();
-    const lanes = TRACKS.map((track) => {
-      const round = this.getRound(current.ordinal, track.id);
-      const clock = this.roundClock(round);
-      const publicClock = round.players.size === 0 && current.elapsedMs >= this.joinCutoffMs()
-        ? { ...clock, phase: 'IDLE', phaseRemainingMs: current.remainingMs, mayAdvanceEarly: false }
-        : clock;
-      return {
-        track,
-        round: { ...publicClock, counts: { total: round.players.size } },
-        difficultyCounts: this.difficultyCounts(round),
-        leaderboard: this.leaderboard(round),
-        trend: this.trendFor(round, clock.phase),
-      };
-    });
-    const nextTotal = this.ordinalPlayerCount(current.ordinal + 1);
-    const currentTotal = this.ordinalPlayerCount(current.ordinal);
+    this.advanceAll();
+    this.cleanup();
+    const ordered = [...this.matches.values()].sort((left, right) => left.index - right.index);
+    const pending = ordered.filter(({ status }) => status === 'MATCHING').map((match) => this.heatSummary(match));
+    const active = ordered
+      .filter(({ status }) => ['GRID', 'RACING', 'RESULT'].includes(status))
+      .map((match) => this.heatSummary(match));
+    const recent = ordered
+      .filter(({ status }) => status === 'COMPLETE')
+      .sort((left, right) => (right.completedAt ?? 0) - (left.completedAt ?? 0))
+      .slice(0, 6)
+      .map((match) => this.heatSummary(match));
     return {
-      round: current,
-      lanes,
-      nextRound: { total: nextTotal, startsInMs: current.remainingMs },
-      joinMode: current.elapsedMs < this.joinCutoffMs() && currentTotal < this.maxPlayers
-        ? 'CURRENT' : nextTotal < this.maxPlayers ? 'NEXT' : 'FULL',
+      pending,
+      active,
+      recent,
+      joinMode: this.activeHumanCount() < this.maxPlayers ? 'OPEN' : 'FULL',
       stats: {
         ...this.stats,
-        activePlayers: currentTotal,
+        activeHumans: this.activeHumanCount(),
+        pendingHeats: pending.length,
+        activeHeats: active.length,
         polePositions: this.stats.perfectLaps,
       },
-      catalogs: { crews: CREWS, drivers: DRIVERS },
+      catalogs: {
+        circuits: CIRCUITS,
+        crews: CREWS,
+        drivers: DRIVERS,
+        difficulties: DIFFICULTIES,
+      },
     };
   }
 
   cleanup() {
-    const now = this.now();
+    const at = this.now();
+    const retentionMs = Math.max(this.sessionTtlMs, this.roundMs * 3);
+    for (const [matchId, match] of this.matches) {
+      if (match.status === 'COMPLETE' && match.completedAt + retentionMs <= at) {
+        this.matches.delete(matchId);
+      }
+    }
     for (const [playerToken, player] of this.players) {
-      if (player.expiresAt <= now) {
+      if (player.hardExpiresAt <= at || !this.matches.has(player.matchId)) {
         this.players.delete(playerToken);
         if (this.devices.get(player.deviceId) === playerToken) this.devices.delete(player.deviceId);
       }
     }
-    const currentOrdinal = this.currentClock().ordinal;
-    for (const [key, round] of this.rounds) {
-      if (round.ordinal < currentOrdinal - 3 || round.ordinal > currentOrdinal + 1) this.rounds.delete(key);
-    }
   }
 }
+
+export { MATCH_STATUSES };

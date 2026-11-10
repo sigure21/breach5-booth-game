@@ -3,6 +3,7 @@ import http from 'node:http';
 import { fileURLToPath } from 'node:url';
 import QRCode from 'qrcode';
 import { GameStore } from './game.mjs';
+import { PRODUCTION_ROUND_MS, PRODUCTION_TIMING, scaledMatchTiming } from './clock.mjs';
 import { publicRaceCatalog } from './race/catalog.mjs';
 
 const ROOT = fileURLToPath(new URL('../', import.meta.url));
@@ -18,9 +19,15 @@ const SECURITY_HEADERS = Object.freeze({
   'X-Frame-Options': 'DENY',
 });
 
-function boundedInteger(value, fallback, min, max) {
-  const parsed = Number.parseInt(value ?? '', 10);
-  return Number.isInteger(parsed) && parsed >= min && parsed <= max ? parsed : fallback;
+function environmentInteger(name, fallback, min, max) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return fallback;
+  if (!/^[0-9]+$/.test(raw)) throw new Error(`${name} must be an integer between ${min} and ${max}`);
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isSafeInteger(parsed) || parsed < min || parsed > max) {
+    throw new Error(`${name} must be an integer between ${min} and ${max}`);
+  }
+  return parsed;
 }
 
 function bearer(req) {
@@ -62,10 +69,11 @@ function statusFor(error) {
     capacity: 429,
     phase_closed: 409,
     choice_locked: 409,
+    wrong_match: 409,
     wrong_round: 409,
     idempotency_conflict: 409,
     invalid_choice: 400,
-    invalid_track: 400,
+    invalid_circuit: 400,
     invalid_crew: 400,
     invalid_driver: 400,
     invalid_difficulty: 400,
@@ -102,6 +110,10 @@ export async function createGameServer({
     ['/assets/cars/ferrari.svg', 'assets/cars/ferrari.svg', 'image/svg+xml; charset=utf-8'],
     ['/assets/cars/mercedes.svg', 'assets/cars/mercedes.svg', 'image/svg+xml; charset=utf-8'],
     ['/assets/cars/mclaren.svg', 'assets/cars/mclaren.svg', 'image/svg+xml; charset=utf-8'],
+    ['/assets/team-cars/red-bull-rb22-2026.webp', 'assets/team-cars/red-bull-rb22-2026.webp', 'image/webp'],
+    ['/assets/team-cars/ferrari-sf26-2026.webp', 'assets/team-cars/ferrari-sf26-2026.webp', 'image/webp'],
+    ['/assets/team-cars/mercedes-w17-2026.webp', 'assets/team-cars/mercedes-w17-2026.webp', 'image/webp'],
+    ['/assets/team-cars/mclaren-mcl40-2026.webp', 'assets/team-cars/mclaren-mcl40-2026.webp', 'image/webp'],
     ['/assets/driver-panels/max-verstappen.webp', 'assets/driver-panels/max-verstappen.webp', 'image/webp'],
     ['/assets/driver-panels/isack-hadjar.webp', 'assets/driver-panels/isack-hadjar.webp', 'image/webp'],
     ['/assets/driver-panels/charles-leclerc.webp', 'assets/driver-panels/charles-leclerc.webp', 'image/webp'],
@@ -143,7 +155,13 @@ export async function createGameServer({
       }
       if (req.method === 'GET' && url.pathname === '/favicon.ico') return send(res, 204, 'image/x-icon', '');
       if (req.method === 'GET' && url.pathname === '/healthz') {
-        return sendJson(res, 200, { ok: true, service: 'nitro-grid', round: store.currentClock().roundId });
+        const clock = store.currentClock();
+        return sendJson(res, 200, {
+          ok: true,
+          service: 'nitro-grid',
+          matchId: clock.matchId,
+          status: clock.phase,
+        });
       }
       if (req.method === 'GET' && url.pathname === '/readyz') {
         return sendJson(res, 200, { ok: true, service: 'nitro-grid' });
@@ -156,14 +174,14 @@ export async function createGameServer({
         return send(res, 200, 'image/svg+xml; charset=utf-8', svg, { 'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'" });
       }
       if (req.method === 'GET' && url.pathname === '/api/catalog') {
-        return sendJson(res, 200, publicRaceCatalog());
+        return sendJson(res, 200, publicRaceCatalog(store.timing));
       }
       if (req.method === 'POST' && url.pathname === '/api/join') {
         if (!joinAllowed()) return sendJson(res, 429, { error: 'join_rate_limited' });
         const body = await jsonBody(req);
         if (!/^[a-f0-9]{32}$/.test(body.deviceId ?? '')) return sendJson(res, 400, { error: 'invalid_device_id' });
         const identity = store.join(
-          bearer(req), body.deviceId, body.trackId, body.difficulty, body.crewId, body.driverId,
+          bearer(req), body.deviceId, body.difficulty, body.crewId, body.driverId,
         );
         return sendJson(res, 201, identity);
       }
@@ -193,10 +211,25 @@ export async function createGameServer({
 }
 
 async function main() {
-  const port = boundedInteger(process.env.PORT, 3000, 1, 65_535);
+  const port = environmentInteger('PORT', 3000, 1, 65_535);
   const host = process.env.HOST ?? '0.0.0.0';
-  const roundMs = boundedInteger(process.env.ROUND_DURATION_MS, 300_000, 3_000, 300_000);
-  const maxPlayers = boundedInteger(process.env.MAX_PLAYERS, 48, 1, 96);
+  const roundMs = environmentInteger('ROUND_DURATION_MS', PRODUCTION_ROUND_MS, 30_000, PRODUCTION_ROUND_MS);
+  const legacyTiming = process.env.ROUND_DURATION_MS
+    ? scaledMatchTiming(roundMs)
+    : PRODUCTION_TIMING;
+  const matchMinWaitMs = environmentInteger('MATCH_MIN_WAIT_MS', legacyTiming.minWaitMs, 250, 60_000);
+  const matchMaxWaitMs = environmentInteger('MATCH_MAX_WAIT_MS', legacyTiming.maxWaitMs, 400, 90_000);
+  const gridMs = environmentInteger('GRID_COUNTDOWN_MS', legacyTiming.gridMs, 100, 15_000);
+  const encounterMs = environmentInteger('ENCOUNTER_DURATION_MS', legacyTiming.encounterMs, 300, 30_000);
+  const minimumExposureMs = environmentInteger('MIN_ENCOUNTER_MS', legacyTiming.minimumExposureMs, 75, 30_000);
+  const resultMs = environmentInteger('RESULT_DURATION_MS', legacyTiming.resultMs, 300, 60_000);
+  const maxPlayers = environmentInteger('MAX_PLAYERS', 48, 4, 48);
+  if (matchMaxWaitMs < matchMinWaitMs) {
+    throw new Error('MATCH_MAX_WAIT_MS must be greater than or equal to MATCH_MIN_WAIT_MS');
+  }
+  if (minimumExposureMs > encounterMs) {
+    throw new Error('MIN_ENCOUNTER_MS must not exceed ENCOUNTER_DURATION_MS');
+  }
   const publicBaseUrl = process.env.PUBLIC_BASE_URL ?? `http://127.0.0.1:${port}`;
   const seedSecret = process.env.NITRO_GRID_SEED_SECRET;
   if (seedSecret && !/^[a-f0-9]{64}$/i.test(seedSecret)) {
@@ -204,14 +237,19 @@ async function main() {
   }
   const store = new GameStore({
     roundMs,
+    matchMinWaitMs,
+    matchMaxWaitMs,
+    gridMs,
+    encounterMs,
+    minimumExposureMs,
+    resultMs,
     maxPlayers,
-    epochMs: Date.now(),
     ...(seedSecret ? { seedSecret } : {}),
   });
   const server = await createGameServer({ store, publicBaseUrl });
   const ticker = setInterval(() => {
     store.tick().catch((error) => console.error(`round tick failed: ${error.message}`));
-  }, Math.max(100, Math.min(500, Math.round(roundMs / 600))));
+  }, Math.max(50, Math.min(250, Math.round(encounterMs / 20))));
 
   const shutdown = (signal) => {
     clearInterval(ticker);
@@ -221,7 +259,7 @@ async function main() {
   process.once('SIGTERM', () => shutdown('SIGTERM'));
   process.once('SIGINT', () => shutdown('SIGINT'));
   server.listen(port, host, () => {
-    console.log(`BREACH//5: NITRO GRID listening on ${host}:${port}`);
+    console.log(`BREACH//5: NITRO GRID heat matchmaker listening on ${host}:${port}`);
     console.log(`participant: ${publicBaseUrl.replace(/\/$/, '')}/play`);
     console.log(`screen:      ${publicBaseUrl.replace(/\/$/, '')}/screen`);
   });

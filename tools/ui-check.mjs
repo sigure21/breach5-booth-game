@@ -3,9 +3,7 @@ import { existsSync, mkdirSync } from 'node:fs';
 import { chromium } from 'playwright-core';
 import { QUESTION_BANK } from '../src/content/questions.mjs';
 import { GameStore } from '../src/game.mjs';
-import {
-  CREWS, DIFFICULTIES, DRIVERS, TRACKS,
-} from '../src/race/catalog.mjs';
+import { CIRCUITS, CREWS, DRIVERS } from '../src/race/catalog.mjs';
 import { createGameServer } from '../src/server.mjs';
 
 const candidates = [
@@ -24,7 +22,13 @@ if (!executablePath) {
   process.exit(0);
 }
 
-const questions = new Map(QUESTION_BANK.map((question) => [question.id, question]));
+const answers = new Map(QUESTION_BANK.map((question) => [question.id, question.correctOptionId]));
+const expectedTeamCars = [
+  '/assets/team-cars/red-bull-rb22-2026.webp',
+  '/assets/team-cars/ferrari-sf26-2026.webp',
+  '/assets/team-cars/mercedes-w17-2026.webp',
+  '/assets/team-cars/mclaren-mcl40-2026.webp',
+];
 let browser;
 
 function safeLabel(value) {
@@ -38,18 +42,14 @@ async function assertNoHorizontalOverflow(page, label) {
     const result = [];
     if (root.scrollWidth > viewportWidth + 1 || document.body.scrollWidth > viewportWidth + 1) {
       result.push({
-        selector: 'document',
-        viewportWidth,
-        documentWidth: root.scrollWidth,
+        selector: 'document', viewportWidth, documentWidth: root.scrollWidth,
         bodyWidth: document.body.scrollWidth,
       });
     }
-
     const selector = (element) => {
-      const name = element.tagName.toLowerCase();
       const id = element.id ? `#${element.id}` : '';
       const classes = [...element.classList].slice(0, 3).map((value) => `.${value}`).join('');
-      return `${name}${id}${classes}`;
+      return `${element.tagName.toLowerCase()}${id}${classes}`;
     };
     const clippedByAncestor = (element, rect) => {
       for (let parent = element.parentElement; parent; parent = parent.parentElement) {
@@ -60,7 +60,6 @@ async function assertNoHorizontalOverflow(page, label) {
       }
       return false;
     };
-
     for (const element of document.querySelectorAll('body *')) {
       const style = getComputedStyle(element);
       const rect = element.getBoundingClientRect();
@@ -72,21 +71,15 @@ async function assertNoHorizontalOverflow(page, label) {
         && !clippedByAncestor(element, rect);
       if (!nestedScroller && !outsideViewport) continue;
       result.push({
-        selector: selector(element),
-        overflowX: style.overflowX,
-        clientWidth: element.clientWidth,
-        scrollWidth: element.scrollWidth,
-        left: Math.round(rect.left * 10) / 10,
-        right: Math.round(rect.right * 10) / 10,
-        viewportWidth,
-        nestedScroller,
-        outsideViewport,
-        text: (element.textContent ?? '').trim().replaceAll(/\s+/g, ' ').slice(0, 100),
+        selector: selector(element), overflowX: style.overflowX,
+        clientWidth: element.clientWidth, scrollWidth: element.scrollWidth,
+        left: Math.round(rect.left * 10) / 10, right: Math.round(rect.right * 10) / 10,
+        viewportWidth, nestedScroller, outsideViewport,
+        text: (element.textContent ?? '').trim().replaceAll(/\s+/g, ' ').slice(0, 80),
       });
     }
     return result;
   });
-
   if (issues.length === 0) return;
   mkdirSync('test-results/overflow', { recursive: true });
   const screenshot = `test-results/overflow/${safeLabel(label)}.png`;
@@ -102,37 +95,48 @@ async function assertTouchTargets(page, selector, label) {
     })
     .map((element) => ({
       text: (element.textContent ?? '').trim().slice(0, 60),
-      width: element.getBoundingClientRect().width,
-      height: element.getBoundingClientRect().height,
+      width: Math.round(element.getBoundingClientRect().width),
+      height: Math.round(element.getBoundingClientRect().height),
     }))
-    .filter(({ height }) => height < 44));
+    .filter(({ height, width }) => height < 44 || width < 44));
   if (tooSmall.length) throw new Error(`${label} touch targets below 44px: ${JSON.stringify(tooSmall)}`);
 }
 
-async function createHarness(label) {
+async function assertUniqueMarkerTransforms(page, selector, label) {
+  await page.waitForFunction((markerSelector) => {
+    const markers = [...document.querySelectorAll(markerSelector)];
+    return markers.length === 4 && markers.every((marker) => marker.getAttribute('transform'));
+  }, selector);
+  const transforms = await page.locator(selector).evaluateAll((markers) => (
+    markers.map((marker) => marker.getAttribute('transform'))
+  ));
+  assert.equal(transforms.length, 4, `${label} did not render four markers`);
+  assert.equal(new Set(transforms).size, 4, `${label} marker transforms overlap: ${JSON.stringify(transforms)}`);
+}
+
+async function createHarness() {
   let now = 0;
   const store = new GameStore({
     now: () => now,
     roundMs: 300_000,
-    seedSecret: `ui-${label}-${'a'.repeat(64)}`.slice(0, 64),
+    matchMinWaitMs: 300,
+    matchMaxWaitMs: 450,
+    gridMs: 100,
+    encounterMs: 300,
+    minimumExposureMs: 75,
+    resultMs: 300,
+    seedSecret: `ui-heat-${'a'.repeat(64)}`.slice(0, 64),
   });
-  const server = await createGameServer({
-    store,
-    publicBaseUrl: 'http://127.0.0.1:18090',
-  });
+  const server = await createGameServer({ store, publicBaseUrl: 'http://127.0.0.1:18090' });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
-  const origin = `http://127.0.0.1:${server.address().port}`;
   return {
     store,
-    origin,
-    setNow(value) { now = value; },
-    async advance(milliseconds) {
-      now += milliseconds;
+    origin: `http://127.0.0.1:${server.address().port}`,
+    async setNow(value) {
+      now = value;
       await store.tick();
     },
-    async close() {
-      await new Promise((resolve) => server.close(resolve));
-    },
+    async close() { await new Promise((resolve) => server.close(resolve)); },
   };
 }
 
@@ -150,301 +154,224 @@ async function api(origin, path, { token, method = 'GET', body } = {}) {
   return value;
 }
 
-async function newMobilePage(origin, token = null) {
-  const context = await browser.newContext({
-    viewport: { width: 320, height: 568 },
-    reducedMotion: 'reduce',
-  });
-  if (token) {
-    await context.addInitScript((value) => {
-      sessionStorage.setItem('nitro-grid-player-token', value);
-    }, token);
-  }
-  const page = await context.newPage();
-  await page.goto(`${origin}/play`);
-  return { context, page };
+async function waitScreen(page, name) {
+  await page.waitForSelector(`#app[data-screen="${name}"]`, { timeout: 6_000 });
 }
 
-async function auditLobby() {
-  const harness = await createHarness('lobby');
-  let context;
+async function auditHeatFlow() {
+  const harness = await createHarness();
+  const mobileContext = await browser.newContext({
+    viewport: { width: 320, height: 568 }, reducedMotion: 'reduce',
+  });
+  const screenContext = await browser.newContext({
+    viewport: { width: 320, height: 568 }, reducedMotion: 'reduce',
+  });
+  const driverPanelRequests = [];
   try {
-    ({ context } = await newMobilePage(harness.origin));
-    const page = context.pages()[0];
-    await page.waitForSelector('.garage-card');
-    assert.equal(await page.locator('.track-card').count(), 2);
+    const page = await mobileContext.newPage();
+    page.on('request', (request) => {
+      if (request.url().includes('/assets/driver-panels/')) driverPanelRequests.push(request.url());
+    });
+    await page.goto(`${harness.origin}/play`);
+    await waitScreen(page, 'garage');
     assert.equal(await page.locator('.crew-card').count(), 4);
-    assert.equal(await page.locator('.driver-card').count(), 0, 'drivers must wait for a crew selection');
     assert.equal(await page.locator('.difficulty-card').count(), 2);
+    assert.equal(await page.locator('.driver-card').count(), 0);
     assert.equal(await page.locator('#join-button').isDisabled(), true);
-    await assertNoHorizontalOverflow(page, 'lobby-320-initial');
-    await assertTouchTargets(page, 'button', 'lobby');
+    assert.deepEqual(
+      (await page.locator('.crew-card img').evaluateAll((images) => images.map((image) => new URL(image.src).pathname))).sort(),
+      [...expectedTeamCars].sort(),
+    );
+    for (const image of await page.locator('.crew-card img').all()) {
+      await image.scrollIntoViewIfNeeded();
+      await image.evaluate((node) => node.decode?.().catch(() => {}));
+      assert.ok(await image.evaluate((node) => node.complete && node.naturalWidth > 0));
+    }
+    await assertNoHorizontalOverflow(page, 'garage-320');
+    await assertTouchTargets(page, 'button', 'garage');
 
-    await page.locator('.track-card').first().click();
     await page.locator('.crew-card').first().click();
     await page.waitForFunction(() => document.querySelectorAll('.driver-card').length === 2);
-    const firstPair = await page.locator('.driver-card strong').allTextContents();
-    assert.equal(firstPair.length, 2);
-    await page.locator('.crew-card').nth(1).click();
-    await page.waitForFunction(
-      (previous) => {
-        const current = [...document.querySelectorAll('.driver-card strong')].map((node) => node.textContent);
-        return current.length === 2 && current.join('|') !== previous.join('|');
-      },
-      firstPair,
-    );
-    assert.equal(await page.locator('.driver-card').count(), 2);
+    assert.equal(await page.locator('.driver-card img').count(), 0, 'reduced motion must omit animated driver panels');
+    assert.equal(driverPanelRequests.length, 0, 'reduced motion requested driver WebP media');
     await page.locator('.driver-card').first().click();
     await page.locator('.difficulty-card').first().click();
     assert.equal(await page.locator('#join-button').isDisabled(), false);
-    await page.locator('.driver-card').first().scrollIntoViewIfNeeded();
-    await page.waitForFunction(() => [...document.images].every((image) => image.complete && image.naturalWidth > 0));
-    await assertNoHorizontalOverflow(page, 'lobby-320-selected');
-
     await page.locator('#join-button').click();
-    await page.waitForSelector('.waiting-card, .race-hero');
-    await assertNoHorizontalOverflow(page, 'lobby-320-joined');
-  } finally {
-    if (context) await context.close();
-    await harness.close();
-  }
-}
+    await waitScreen(page, 'matching');
+    assert.equal(await page.locator('[data-testid="match-grid"] .grid-slot').count(), 4);
+    assert.equal(await page.locator('[data-testid="match-grid"] .occupied').count(), 1);
+    assert.equal(await page.locator('[data-testid="match-grid"] .waiting').count(), 3);
+    await assertNoHorizontalOverflow(page, 'matching-320');
 
-async function auditCompletePollingStops() {
-  const harness = await createHarness('complete-polling');
-  let context;
-  try {
-    const identity = await api(harness.origin, '/api/join', {
-      method: 'POST',
-      body: {
-        deviceId: 'c'.repeat(32),
-        trackId: TRACKS[0].id,
-        difficulty: DIFFICULTIES[0],
-        crewId: CREWS[0].id,
-        driverId: DRIVERS.find(({ crewId }) => crewId === CREWS[0].id).id,
-      },
-    });
-    harness.setNow(300_000);
-    await harness.store.tick();
-
-    context = await browser.newContext({
-      viewport: { width: 320, height: 568 },
-      reducedMotion: 'reduce',
-    });
-    await context.addInitScript((token) => {
-      sessionStorage.setItem('nitro-grid-player-token', token);
-    }, identity.token);
-    const page = await context.newPage();
-    let stateRequests = 0;
-    page.on('request', (request) => {
-      if (new URL(request.url()).pathname === '/api/state') stateRequests += 1;
-    });
-    await page.goto(`${harness.origin}/play`);
-    await page.waitForSelector('.result-card');
-    assert.equal(await page.locator('.race-timer span').textContent(), 'RACE COMPLETE');
-    const requestsAtComplete = stateRequests;
-    assert.equal(requestsAtComplete, 1);
-    await page.waitForTimeout(2_000);
-    assert.equal(stateRequests, requestsAtComplete, 'COMPLETE kept polling /api/state every 750ms');
-    await assertNoHorizontalOverflow(page, 'complete-polling-stopped-320');
-  } finally {
-    if (context) await context.close();
-    await harness.close();
-  }
-}
-
-async function auditRaceFlow(track, difficulty, crew, flowIndex) {
-  const harness = await createHarness(`${track.id}-${difficulty}`);
-  let context;
-  let screenContext;
-  const driver = DRIVERS.find(({ crewId }) => crew.id === crewId);
-  const injectWrongAnswer = flowIndex === 0;
-  const originalDeviceId = String(flowIndex + 1).padStart(32, '0');
-  assert.ok(driver);
-  try {
-    const identity = await api(harness.origin, '/api/join', {
-      method: 'POST',
-      body: {
-        deviceId: originalDeviceId,
-        trackId: track.id,
-        difficulty,
-        crewId: crew.id,
-        driverId: driver.id,
-      },
-    });
-    harness.setNow(30_000);
-    await harness.store.tick();
-
-    ({ context } = await newMobilePage(harness.origin, identity.token));
-    const page = context.pages()[0];
-    await page.evaluate((value) => localStorage.setItem('nitro-grid-device-id', value), originalDeviceId);
-    const phases = [];
-    const expectedCorrectness = new Map();
-    let answered = 0;
-
-    for (let phaseIndex = 0; phaseIndex < 5; phaseIndex += 1) {
-      const state = harness.store.state(identity.token);
-      phases.push(state.round.phase);
-      assert.ok(['LAUNCH', 'SECTOR_1', 'PIT_STOP', 'SECTOR_2', 'SPRINT'].includes(state.round.phase));
-      assert.ok(state.tasks.length > 0);
-      await page.reload();
-      await page.waitForSelector('.race-hero');
-      await page.waitForSelector('.answer-card');
-      await assertNoHorizontalOverflow(page, `${track.id}-${difficulty}-${state.round.phase}-base`);
-      await assertTouchTargets(page, '.answer-card, .confirm-button', `${track.id}/${difficulty}/${state.round.phase}`);
-
-      const annotations = await page.locator('.evidence-note').count();
-      if (difficulty === 'BEGINNER') assert.ok(annotations > 0, `${state.round.phase} lacks guided evidence`);
-      else assert.equal(annotations, 0, `${state.round.phase} leaked guided evidence`);
-      if (state.round.phase === 'PIT_STOP') assert.equal(await page.locator('.trend-card').count(), 1);
-
-      for (const task of state.tasks) {
-        const source = questions.get(task.id);
-        assert.ok(source, `missing source question ${task.id}`);
-        const correct = source.correctOptionId;
-        const submitWrong = injectWrongAnswer && answered === 0;
-        const selectedOption = submitWrong
-          ? task.options.find(({ id }) => id !== correct)
-          : task.options.find(({ id }) => id === correct);
-        assert.ok(selectedOption, `${task.id} has no ${submitWrong ? 'wrong' : 'correct'} option`);
-        const optionIndex = task.options.findIndex(({ id }) => id === selectedOption.id);
-        assert.ok(optionIndex >= 0, `${task.id} omitted its correct option`);
-        const sourceOption = source.options.find(({ id }) => id === selectedOption.id);
-        const correctOption = source.options.find(({ id }) => id === correct);
-        assert.ok(sourceOption?.feedback);
-        assert.ok(correctOption?.label);
-        expectedCorrectness.set(task.id, !submitWrong);
-
-        const card = page.locator(`#confirm-${task.id}`).locator('..');
-        await card.locator('.answer-card').nth(optionIndex).click();
-        const confirm = page.locator(`#confirm-${task.id}`);
-        await confirm.waitFor({ state: 'visible' });
-        assert.equal(await confirm.isDisabled(), false);
-        await assertNoHorizontalOverflow(page, `${track.id}-${difficulty}-${state.round.phase}-${task.id}-preview`);
-        await confirm.click();
-
-        const feedback = page.locator('.feedback-card');
-        await feedback.waitFor({ state: 'visible' });
-        assert.equal(await feedback.evaluate(
-          (element, expectedClass) => element.classList.contains(expectedClass),
-          submitWrong ? 'wrong' : 'correct',
-        ), true);
-        assert.equal(
-          await feedback.locator('.feedback-flag').textContent(),
-          submitWrong ? '× TIME PENALTY' : '✓ CLEAN LINE',
-        );
-        assert.equal((await feedback.locator('.selected-answer strong').textContent())?.trim(), selectedOption.label);
-        assert.equal((await feedback.locator('.feedback-explanation').textContent())?.trim(), sourceOption.feedback);
-        if (submitWrong) {
-          assert.equal(await feedback.locator('.correct-answer').count(), 1);
-          assert.equal((await feedback.locator('.correct-answer strong').textContent())?.trim(), correctOption.label);
-        } else {
-          assert.equal(await feedback.locator('.correct-answer').count(), 0);
-        }
-        assert.match((await feedback.locator('.race-effect b').textContent()) ?? '', /\S/);
-        await assertNoHorizontalOverflow(page, `${track.id}-${difficulty}-${state.round.phase}-${task.id}-feedback`);
-        await assertTouchTargets(page, '#feedback-continue', `${task.id} feedback`);
-        await page.locator('#feedback-continue').click();
-        await feedback.waitFor({ state: 'detached' });
-        answered += 1;
-      }
-
-      const after = harness.store.state(identity.token);
-      assert.ok(after.tasks.every((task) => (
-        task.selected && task.feedback?.correct === expectedCorrectness.get(task.id)
-      )));
-      await harness.advance(3_100);
+    const token = await page.evaluate(() => sessionStorage.getItem('nitro-grid-player-token'));
+    assert.match(token, /^[A-Za-z0-9_-]{32}$/);
+    const initialState = await api(harness.origin, '/api/state', { token });
+    const catalog = await api(harness.origin, '/api/catalog');
+    for (let index = 0; index < 3; index += 1) {
+      const crew = catalog.crews[index + 1];
+      const driver = catalog.drivers.find(({ crewId }) => crewId === crew.id);
+      await api(harness.origin, '/api/join', {
+        method: 'POST',
+        body: {
+          deviceId: (index + 100).toString(16).padStart(32, '0'),
+          difficulty: 'BEGINNER', crewId: crew.id, driverId: driver.id,
+        },
+      });
     }
 
-    assert.deepEqual(phases, ['LAUNCH', 'SECTOR_1', 'PIT_STOP', 'SECTOR_2', 'SPRINT']);
-    assert.equal(answered, 7);
-    const result = harness.store.state(identity.token);
-    const expectedCorrect = injectWrongAnswer ? 6 : 7;
-    const expectedBand = injectWrongAnswer ? 'PODIUM' : 'POLE_POSITION';
-    assert.equal(result.round.phase, 'RESULT');
-    assert.equal(result.race.correct, expectedCorrect);
-    assert.equal(result.race.accuracy, injectWrongAnswer ? 86 : 100);
-    assert.equal(result.result.finishBand, expectedBand);
-    assert.equal(result.result.review.length, 7);
-    await page.reload();
-    await page.waitForSelector('.result-card');
-    await page.getByText(injectWrongAnswer ? 'PODIUM FINISH' : 'POLE POSITION', { exact: true }).waitFor();
-    assert.equal(await page.locator('.result-review').count(), 1);
-    const review = page.locator('.result-review');
-    if (await review.evaluate((element) => element.tagName === 'DETAILS' && !element.open)) {
-      await review.locator('summary').click();
-    }
-    assert.equal(await page.locator('.review-item').count(), 7);
-    assert.equal(await page.locator('.review-item.wrong').count(), injectWrongAnswer ? 1 : 0);
-    for (const [index, row] of result.result.review.entries()) {
-      const labels = await page.locator('.review-item').nth(index).locator('.review-answers strong').allTextContents();
-      assert.deepEqual(labels, row.correct
-        ? [row.selectedLabel]
-        : [row.selectedLabel, row.correctOptionLabel]);
-      assert.ok(row.selectedLabel && row.selectedLabel !== row.selected);
-      assert.ok(row.correctOptionLabel && row.correctOptionLabel !== row.correctOptionId);
-    }
-    await assertNoHorizontalOverflow(page, `${track.id}-${difficulty}-result`);
-    await assertTouchTargets(page, '.result-card button, .result-card summary', `${track.id}/${difficulty} result`);
-
-    screenContext = await browser.newContext({
-      viewport: { width: 320, height: 568 },
-      reducedMotion: 'reduce',
-    });
     const screen = await screenContext.newPage();
     await screen.goto(`${harness.origin}/screen`);
-    await screen.waitForFunction(() => document.querySelectorAll('.lane-card').length === 2);
-    await screen.waitForFunction(() => document.querySelector('.qr-frame img')?.naturalWidth > 0);
-    await assertNoHorizontalOverflow(screen, `${track.id}-${difficulty}-screen-320`);
+    await screen.waitForSelector('#screen-app[data-screen="matching"] [data-testid="screen-board"]');
+    assert.equal(await screen.locator('[data-testid="screen-match-grid"] .screen-grid-slot').count(), 4);
+    await assertNoHorizontalOverflow(screen, 'screen-matching-320');
 
-    if (injectWrongAnswer) {
-      await page.locator('.result-card .primary-button').click();
-      await page.waitForSelector('.garage-card');
-      assert.equal(await page.evaluate(() => localStorage.getItem('nitro-grid-device-id')), null);
-      await page.locator('.track-card').first().click();
-      await page.locator('.crew-card').first().click();
-      await page.waitForFunction(() => document.querySelectorAll('.driver-card').length === 2);
-      await page.locator('.driver-card').first().click();
-      await page.locator('.difficulty-card').first().click();
-      await page.locator('#join-button').click();
-      await page.waitForSelector('.waiting-card');
-      const retryIdentity = await page.evaluate(() => ({
-        token: sessionStorage.getItem('nitro-grid-player-token'),
-        deviceId: localStorage.getItem('nitro-grid-device-id'),
-      }));
-      assert.match(retryIdentity.token ?? '', /^[A-Za-z0-9_-]{32}$/);
-      assert.notEqual(retryIdentity.token, identity.token);
-      assert.match(retryIdentity.deviceId ?? '', /^[a-f0-9]{32}$/);
-      assert.notEqual(retryIdentity.deviceId, originalDeviceId);
-      const queued = await api(harness.origin, '/api/state', { token: retryIdentity.token });
-      assert.equal(queued.round.phase, 'QUEUED');
-      assert.equal(queued.round.ordinal, 1);
-      assert.equal(queued.queue.selectedTrack, TRACKS[0].id);
-      await assertNoHorizontalOverflow(page, `${track.id}-${difficulty}-retry-queued`);
-    }
+    await harness.setNow(300);
+    await waitScreen(page, 'grid');
+    assert.equal(await page.locator('.start-lights i').count(), 5);
+    assert.equal(await page.locator('[data-testid="track-map"] svg').count(), 1);
+    assert.equal(await page.locator('[data-testid="leaderboard"] .standing-row').count(), 4);
+    assert.equal(await page.locator('.race-marker').count(), 4);
+    await assertUniqueMarkerTransforms(page, '[data-testid="track-map"] .race-marker', 'participant grid');
+    await screen.waitForSelector('#screen-app[data-screen="grid"] [data-testid="screen-track"]');
+    await assertUniqueMarkerTransforms(screen, '[data-testid="screen-track"] .race-marker', 'screen grid');
+    await assertNoHorizontalOverflow(page, 'grid-320');
+    await assertNoHorizontalOverflow(screen, 'screen-grid-320');
+
+    await harness.setNow(400);
+    await waitScreen(page, 'racing');
+    await page.waitForSelector('[data-testid="encounter-card"]');
+    assert.equal(await page.locator('.race-marker').count(), 4);
+    assert.equal(await page.locator('[data-testid="leaderboard"] .standing-row').count(), 4);
+    assert.match(await page.locator('#race-speed').textContent(), /^\d+$/);
+    assert.equal(await page.locator('#race-lap').textContent(), '1/2');
+    assert.match(await page.locator('#race-position').textContent(), /^P[1-4]$/);
+    assert.equal(await page.locator('#race-gate').textContent(), '1/10');
+    assert.equal(await page.locator('#race-overtake').count(), 1);
+    await assertUniqueMarkerTransforms(page, '[data-testid="track-map"] .race-marker', 'participant first racing');
+    await screen.waitForSelector('#screen-app[data-screen="racing"] [data-testid="screen-track"]');
+    await assertUniqueMarkerTransforms(screen, '[data-testid="screen-track"] .race-marker', 'screen first racing');
+    const durations = await page.locator('.race-marker').evaluateAll((markers) => (
+      markers.map((marker) => getComputedStyle(marker).transitionDuration)
+    ));
+    assert.ok(durations.every((duration) => duration === '0s'), JSON.stringify(durations));
+    const firstTransform = await page.locator('.race-marker').first().getAttribute('transform');
+    await harness.setNow(500);
+    await page.waitForTimeout(600);
+    const movedTransform = await page.locator('.race-marker').first().getAttribute('transform');
+    assert.notEqual(movedTransform, firstTransform, 'SVG car marker did not move with modeled progress');
+    await assertNoHorizontalOverflow(page, 'racing-320');
+
+    let liveState = await api(harness.origin, '/api/state', { token });
+    const firstTask = liveState.tasks[0];
+    const wrongChoice = firstTask.options.find(({ id }) => id !== answers.get(firstTask.id)).id;
+    const directVerdict = await api(harness.origin, '/api/action', {
+      token,
+      method: 'POST',
+      body: {
+        matchId: initialState.match.id,
+        task: firstTask.id,
+        choice: wrongChoice,
+        actionId: 'ui_recovery_0001',
+      },
+    });
+    assert.equal(directVerdict.feedback.correct, false);
+    await page.reload();
+    await waitScreen(page, 'feedback');
+    await page.waitForSelector('[data-testid="feedback-card"].wrong');
+    const recoveredText = await page.locator('[data-testid="feedback-card"]').textContent();
+    assert.match(recoveredText, /LOST TIME|근거와 다른 선택/);
+    assert.ok(recoveredText.includes(directVerdict.feedback.explanation));
+    await assertNoHorizontalOverflow(page, 'wrong-feedback-320');
+    await page.locator('#feedback-continue').click();
+    await waitScreen(page, 'racing');
+    await page.waitForTimeout(1_100);
+    assert.equal(await page.locator('[data-testid="feedback-card"]').count(), 0,
+      'dismissed recovered feedback reappeared for the same task');
+    liveState = await api(harness.origin, '/api/state', { token });
+    assert.equal(liveState.tasks[0].id, firstTask.id);
+    assert.equal(liveState.tasks[0].selected, wrongChoice);
+    assert.equal(liveState.tasks[0].feedback.correct, false);
+
+    await harness.setNow(700);
+    liveState = await api(harness.origin, '/api/state', { token });
+    const secondTask = liveState.tasks[0];
+    assert.notEqual(secondTask.id, firstTask.id);
+    await page.waitForSelector(`#confirm-${secondTask.id}`);
+    const correctIndex = secondTask.options.findIndex(({ id }) => id === answers.get(secondTask.id));
+    await page.locator('.answer-card').nth(correctIndex).click();
+    await page.locator(`#confirm-${secondTask.id}`).click();
+    await waitScreen(page, 'feedback');
+    await page.waitForSelector('[data-testid="feedback-card"].correct');
+    assert.match(await page.locator('[data-testid="feedback-card"]').textContent(), /CLEAN OVERTAKE|레이싱 라인이/);
+    await page.locator('#feedback-continue').click();
+
+    const beforeTrend = await api(harness.origin, '/api/state', { token });
+    await harness.setNow(2_300);
+    await page.waitForFunction(() => document.querySelector('#race-lap')?.textContent === '2/2');
+    assert.equal(await page.locator('#race-lap').textContent(), '2/2');
+    const trendState = await api(harness.origin, '/api/state', { token });
+    assert.ok(trendState.match.encounterIndex >= 5);
+    assert.equal(trendState.race.answered, beforeTrend.race.answered);
+    assert.equal(trendState.race.correct, beforeTrend.race.correct);
+    assert.equal(trendState.trend.scoring, false);
+    assert.equal(new URL(trendState.trend.sourceUrl).protocol, 'https:');
+    const trendCard = page.locator('[data-testid="trend-briefing"]');
+    await trendCard.waitFor();
+    assert.equal(await trendCard.locator('h2').textContent(), trendState.trend.title);
+    assert.ok((await trendCard.locator('.trend-summary').textContent()).includes(trendState.trend.summary));
+    assert.equal(await trendCard.locator('.trend-actions li').count(), trendState.trend.actions.length);
+    const trendText = await trendCard.textContent();
+    assert.match(trendText, /비채점.*미반영/);
+    assert.ok(trendText.includes(trendState.trend.sourceName));
+    assert.ok(trendText.includes(trendState.trend.asOf));
+    const trendLink = trendCard.locator('.trend-source a');
+    assert.equal(new URL(await trendLink.getAttribute('href')).protocol, 'https:');
+    assert.equal(await trendLink.getAttribute('target'), '_blank');
+    assert.match(await trendLink.getAttribute('rel'), /noopener/);
+    assert.equal(await page.evaluate(() => {
+      const primary = document.querySelector('[data-testid="encounter-card"], [data-testid="feedback-card"], .waiting-card');
+      const trend = document.querySelector('[data-testid="trend-briefing"]');
+      return Boolean(primary && trend && (primary.compareDocumentPosition(trend) & Node.DOCUMENT_POSITION_FOLLOWING));
+    }), true, 'trend briefing must follow the scored task/feedback/waiting surface');
+    await screen.waitForSelector('#screen-app[data-screen="racing"] [data-testid="screen-track"]');
+    assert.equal(await screen.locator('[data-testid="screen-track"] .race-marker').count(), 4);
+    assert.equal(await screen.locator('[data-testid="screen-leaderboard"] .screen-order-row').count(), 4);
+    assert.equal(await screen.locator('[data-testid="screen-telemetry"]').count(), 1);
+    const screenTrend = screen.locator('[data-testid="screen-trend"]');
+    await screenTrend.waitFor();
+    assert.equal(await screenTrend.locator('h2').textContent(), trendState.trend.title);
+    assert.match(await screenTrend.textContent(), /비채점.*미반영/);
+    await assertNoHorizontalOverflow(page, 'participant-trend-320');
+    await assertNoHorizontalOverflow(screen, 'screen-racing-320');
+
+    await harness.setNow(3_400);
+    await waitScreen(page, 'result');
+    assert.equal(await page.locator('[data-testid="result-card"]').count(), 1);
+    assert.equal(await page.locator('[data-testid="result-leaderboard"] .standing-row').count(), 4);
+    assert.equal(await page.locator('[data-testid="result-review"] .review-item').count(), 10);
+    await assertNoHorizontalOverflow(page, 'result-320');
+    await screen.waitForSelector('#screen-app[data-screen="result"] [data-testid="screen-board"]');
+    await assertNoHorizontalOverflow(screen, 'screen-result-320');
+
+    await page.locator('[data-testid="result-card"] .primary-button').click();
+    await waitScreen(page, 'garage');
+    assert.equal(await page.evaluate(() => sessionStorage.getItem('nitro-grid-player-token')), null);
+    assert.notEqual(initialState.match.id, null);
   } finally {
-    if (screenContext) await screenContext.close();
-    if (context) await context.close();
+    await mobileContext.close();
+    await screenContext.close();
     await harness.close();
   }
 }
 
 try {
-  browser = await chromium.launch({
-    headless: true,
-    executablePath,
-  });
-  await auditLobby();
-  await auditCompletePollingStops();
-  let flowIndex = 0;
-  for (const [trackIndex, track] of TRACKS.entries()) {
-    for (const [difficultyIndex, difficulty] of DIFFICULTIES.entries()) {
-      const crew = CREWS[(trackIndex * DIFFICULTIES.length + difficultyIndex) % CREWS.length];
-      await auditRaceFlow(track, difficulty, crew, flowIndex);
-      flowIndex += 1;
-    }
-  }
-  console.log('NITRO GRID 320px lobby, correct/wrong feedback, result, spectator, and four full race flows passed.');
+  browser = await chromium.launch({ executablePath, headless: true });
+  assert.equal(CIRCUITS.length, 3);
+  assert.equal(CREWS.length, 4);
+  assert.equal(DRIVERS.length, 8);
+  await auditHeatFlow();
+  console.log('UI layout checks passed at 320x568 for garage, heat matching, grid, race, feedback, result, retry, and live screen.');
 } finally {
-  if (browser) await browser.close();
+  await browser?.close();
 }

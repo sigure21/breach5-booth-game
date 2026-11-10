@@ -33,6 +33,19 @@ The scenarios intentionally omit vendor-specific procedures. In a real event,
 the organization's approved playbook, legal obligations, asset context, and
 incident commander take precedence.
 
+## Motorsport presentation references
+
+These references affect presentation only; they do not determine whether a security answer is correct. Circuit paths, speed changes, energy effects and race outcomes are locally authored game models and must not be described as real telemetry or an official Formula 1 simulation.
+
+| Game element | Official reference | Bounded use |
+| --- | --- | --- |
+| Temple Speed Ring | [Formula 1 — Autodromo Nazionale Monza](https://www.formula1.com/en/information/italy-autodromo-nazionale-monza.FiJN1jnQlRLeHqOxIt13m) | Public 5.793 km / 53-lap reference values and the general long-straight, high-speed character inform an original abstract profile. |
+| Harbour Street Loop | [Formula 1 — Circuit de Monaco](https://www.formula1.com/en/information/monaco-circuit-de-monaco-monte-carlo.2ZWRtIcSI6ZzVGX1uGRpkJ) and [Formula 1 circuit guide](https://www.formula1.com/en/latest/article/circuit-guide-everything-you-need-to-know-about-the-circuit-de-monaco.vFsmfGHr6RWyLFtxi58wi) | Public 3.337 km / 78-lap reference values and the narrow, precision-oriented street-circuit character inform an original abstract profile. |
+| Airfield Flow Circuit | [Formula 1 — 2026 British Grand Prix](https://www.formula1.com/en/racing/2026/great-britain) | Public 5.891 km / 52-lap reference values and the fast, flowing direction-change character inform an original abstract profile. |
+| 2026 UI language | [Formula 1 — 2026 regulations terminology update](https://corp.formula1.com/f1-2026-regulations-terminology-update/) and [Formula 1 — 2026 regulations explained](https://www.formula1.com/en/latest/article/f1-2026-regulations-explained-the-key-terms-for-formula-1s-new-for-2026-rules.3T5BU6TC9quGcIpGzoWkY0) | Use Battery/Recharge, Boost Mode, Overtake Mode and Active Aero terminology; do not label the 2026 overtaking feature as DRS. |
+
+The `officialLengthKm` and `officialRaceLaps` fields in the public catalog are reference metadata. The `speedRangeKph`, `speedZones`, two-lap distance, SVG paths and all car positions are design assumptions for this booth game.
+
 ## Trend cards
 
 | Card | Official source | Source date | Bounded claim used in the game |

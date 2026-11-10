@@ -1,37 +1,41 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { clockAt, phaseAtElapsed, phaseBounds } from '../src/clock.mjs';
+import {
+  HEAT_SIZE, PRODUCTION_TIMING, TOTAL_ENCOUNTERS, TOTAL_LAPS,
+  maximumHeatRuntime, phaseBounds, scaledMatchTiming,
+} from '../src/clock.mjs';
 
-test('production race phases cover exactly five minutes', () => {
-  const expected = [
-    ['JOIN', 0, 30_000],
-    ['LAUNCH', 30_000, 55_000],
-    ['SECTOR_1', 55_000, 105_000],
-    ['PIT_STOP', 105_000, 140_000],
-    ['SECTOR_2', 140_000, 195_000],
-    ['SPRINT', 195_000, 250_000],
-    ['RESULT', 250_000, 300_000],
-  ];
-  assert.deepEqual(phaseBounds().map(({ id, startMs, endMs }) => [id, startMs, endMs]), expected);
-  for (const [id, start, end] of expected) {
-    assert.equal(phaseAtElapsed(start).id, id);
-    assert.equal(phaseAtElapsed(end - 1).id, id);
-  }
+test('production heat uses a 30-45 second four-car matchmaking window', () => {
+  assert.equal(HEAT_SIZE, 4);
+  assert.equal(TOTAL_ENCOUNTERS, 10);
+  assert.equal(TOTAL_LAPS, 2);
+  assert.deepEqual(PRODUCTION_TIMING, {
+    minWaitMs: 30_000,
+    maxWaitMs: 45_000,
+    gridMs: 5_000,
+    encounterMs: 18_000,
+    minimumExposureMs: 4_000,
+    resultMs: 25_000,
+  });
+  const timing = scaledMatchTiming();
+  assert.equal(maximumHeatRuntime(timing), 255_000);
+  assert.ok(timing.minWaitMs >= 30_000 && timing.maxWaitMs <= 60_000);
 });
 
-test('clock rolls over on the server-owned 300 second boundary', () => {
-  assert.equal(clockAt(299_999).roundId, 'r0');
-  assert.equal(clockAt(299_999).phase, 'RESULT');
-  assert.equal(clockAt(300_000).roundId, 'r1');
-  assert.equal(clockAt(300_000).phase, 'JOIN');
-  assert.equal(clockAt(900_001).roundId, 'r3');
-});
-
-test('accelerated verification duration preserves race phase ordering', () => {
-  const bounds = phaseBounds(30_000);
-  assert.equal(bounds[0].startMs, 0);
-  assert.equal(bounds.at(-1).endMs, 30_000);
-  assert.deepEqual(bounds.map((entry) => entry.id), [
-    'JOIN', 'LAUNCH', 'SECTOR_1', 'PIT_STOP', 'SECTOR_2', 'SPRINT', 'RESULT',
-  ]);
+test('30 second verification timing preserves every heat boundary', () => {
+  const timing = scaledMatchTiming(30_000);
+  assert.deepEqual(timing, {
+    minWaitMs: 3_000,
+    maxWaitMs: 4_500,
+    gridMs: 500,
+    encounterMs: 1_800,
+    minimumExposureMs: 400,
+    resultMs: 2_500,
+    totalEncounters: 10,
+    totalLaps: 2,
+    seats: 4,
+  });
+  assert.equal(maximumHeatRuntime(timing), 25_500);
+  assert.deepEqual(phaseBounds(30_000).map(({ id }) => id), ['MATCHING', 'GRID', 'RACING', 'RESULT']);
+  assert.equal(phaseBounds(30_000).at(-1).endMs, 25_500);
 });

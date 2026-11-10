@@ -3,27 +3,28 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#071019">
-  <meta name="description" content="5분 동안 보안 판단으로 니트로를 획득하는 OWASP Korea 2026 모바일 부스 게임">
+  <meta name="theme-color" content="#050b10">
+  <meta name="description" content="4대가 겨루는 10문제 모바일 보안 레이스">
   <title>BREACH//5 · NITRO GRID</title>
   <link rel="stylesheet" href="/assets/app.css">
 </head>
 <body class="play-body">
-  <div class="grid-glow" aria-hidden="true"></div>
+  <div class="ambient-grid" aria-hidden="true"></div>
   <main class="mobile-shell">
     <header class="mobile-header">
       <a class="wordmark" href="/play" aria-label="NITRO GRID 처음으로">
         <span>BREACH//5</span><b>NITRO GRID</b>
       </a>
-      <span class="live-chip"><i aria-hidden="true"></i> BOOTH LIVE</span>
+      <span class="live-chip"><i aria-hidden="true"></i> RACE CONTROL</span>
     </header>
-    <div id="connection" class="connection" role="status">그리드 연결 확인 중</div>
+    <div id="connection" class="connection" role="status">Race Control 연결 중</div>
     <div id="notice" class="notice" role="alert" hidden></div>
     <section id="app" class="app-stage" aria-live="polite"></section>
     <footer class="mobile-footer">
-      <div class="footer-copy">
-        <span>OWASP Korea 2026 · Security Racing Lab</span>
-        <small>비공식·비상업적 교육용 · EA SPORTS, F1, 각 팀·선수와 비제휴</small>
+      <div>
+        <span>OWASP Korea 2026 · Security Sprint</span>
+        <small>비공식·비상업적 교육용 · F1, EA, 각 팀·선수와 비제휴</small>
+        <small>공식 서킷 특성에서 영감을 받은 오리지널 압축 시뮬레이션이며, 표시 속도·경로는 실제 telemetry가 아닙니다.</small>
       </div>
       <a href="/screen">라이브 전광판</a>
     </footer>

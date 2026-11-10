@@ -7,9 +7,9 @@
 - 공개 HTTP 표면: `/play`, `/screen`, allowlist된 정적 자산과 `/api/*`
 - 서버 소유 상태: 익명 참가 토큰, 라운드 덱, 제출 기록, 점수
 - 비밀값: `.runtime/booth.env`의 `NITRO_GRID_SEED_SECRET`
-- 외부 미디어: 저장소에 출처와 함께 포함된 애니메이션 패널
+- 외부 미디어: 저장소에 출처와 함께 포함된 애니메이션 패널과 공식 2026 car 사진
 
-브라우저는 `trackId`, `difficulty`, `crewId`, `driverId`, 현재 공개된 `task`와 그 task의 `choice`만 제출할 수 있습니다. 임의 코드, URL, 파일 경로, 명령 또는 템플릿은 받지 않습니다.
+브라우저는 `difficulty`, `crewId`, `driverId`, 현재 공개된 `task`와 그 task의 `choice`만 제출할 수 있습니다. circuit, AI racer, 순위, 속도와 energy state는 서버가 정합니다. 임의 코드, URL, 파일 경로, 명령 또는 템플릿은 받지 않습니다.
 
 ## 서버 판정
 
@@ -17,7 +17,10 @@
 - 제출 전 API에는 `correctOptionId`, 정답 해설 또는 결과 review가 포함되지 않습니다.
 - 답변은 현재 phase에 공개된 task와 그 task의 allowlist 선택지에 한해 1회 저장됩니다.
 - `actionId`는 참가자별 멱등성 키입니다. 동일 본문의 재전송은 최초 판정을 그대로 재생하고, 같은 키를 다른 task/choice에 재사용하면 거부합니다.
-- 재접속 시 최초 팀·선수·서킷·난이도와 덱이 유지됩니다.
+- 재접속 시 최초 팀·선수·난이도, 배정된 match/circuit와 deck이 유지됩니다.
+- matchmaking은 정확히 4 seat로 닫히며, 45초 deadline의 빈 seat만 서버가 deterministic AI로 채웁니다.
+- 다섯 번째 사람은 진행 중 match에 추가되지 않고 다음 open match로 배정됩니다.
+- AI 선택과 race 결과는 서버 HMAC seed에서 계산되며 클라이언트 입력으로 덮어쓸 수 없습니다.
 
 정답은 비밀 플래그가 아닙니다. 문제은행은 교육 콘텐츠이므로 저장소 소스에서 읽을 수 있습니다. 행사 중 브라우저 API가 조기 노출하지 않는 것이 위협 경계입니다.
 
@@ -39,8 +42,8 @@
 
 - `deviceId`는 128-bit 임의값이지만 인증이나 사람 식별 수단이 아닙니다.
 - 참가 bearer token은 `sessionStorage`, device ID는 `localStorage`에 저장됩니다.
-- 슬라이딩 세션 TTL은 해당 라운드 보관 만료를 넘을 수 없고, 정상 UI는 `COMPLETE` 이후 상태 polling을 중단합니다.
-- 결과 화면에서 사용자가 재도전을 명시하면 기존 재접속용 device ID를 버리고 새 ID로 다음 그리드에 예약합니다.
+- 슬라이딩 세션 TTL은 해당 match 보관 만료를 넘을 수 없고, 정상 UI는 `COMPLETE` 이후 상태 polling을 중단합니다.
+- 결과 화면에서 사용자가 재도전을 명시하면 기존 재접속용 device ID를 버리고 새 ID로 다음 heat에 참여합니다.
 - 새 브라우저 프로필이나 저장소 삭제로 새 ID를 만들 수 있어 악의적 정원 소진을 막지 못합니다.
 - 이름, 이메일, 전화번호를 받지 않지만 reverse proxy나 플랫폼은 별도 access log를 남길 수 있습니다.
 
