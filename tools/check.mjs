@@ -5,6 +5,8 @@ import { fileURLToPath } from 'node:url';
 const root = fileURLToPath(new URL('../', import.meta.url));
 const syntaxTargets = [
   'src/clock.mjs',
+  'src/content/circuit-questions.mjs',
+  'src/content/expanded-questions.mjs',
   'src/content/questions.mjs',
   'src/content/trends.mjs',
   'src/race/catalog.mjs',

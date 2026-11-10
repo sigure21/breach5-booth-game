@@ -1,13 +1,14 @@
 export const PRODUCTION_ROUND_MS = 300_000;
 export const HEAT_SIZE = 4;
-export const TOTAL_ENCOUNTERS = 10;
+export const MIN_ENCOUNTERS = 10;
+export const MAX_ENCOUNTERS = 15;
 export const TOTAL_LAPS = 2;
 
 export const PRODUCTION_TIMING = Object.freeze({
   minWaitMs: 30_000,
   maxWaitMs: 45_000,
   gridMs: 5_000,
-  encounterMs: 18_000,
+  encounterMs: 15_000,
   minimumExposureMs: 4_000,
   resultMs: 25_000,
 });
@@ -36,14 +37,15 @@ export function scaledMatchTiming(roundMs = PRODUCTION_ROUND_MS) {
     encounterMs,
     minimumExposureMs,
     resultMs,
-    totalEncounters: TOTAL_ENCOUNTERS,
+    minEncounters: MIN_ENCOUNTERS,
+    maxEncounters: MAX_ENCOUNTERS,
     totalLaps: TOTAL_LAPS,
     seats: HEAT_SIZE,
   });
 }
 
 export function maximumHeatRuntime(timing) {
-  return timing.maxWaitMs + timing.gridMs + timing.encounterMs * timing.totalEncounters + timing.resultMs;
+  return timing.maxWaitMs + timing.gridMs + timing.encounterMs * timing.maxEncounters + timing.resultMs;
 }
 
 // Compatibility helpers retained for operator health output and old imports.
@@ -88,11 +90,11 @@ export function phaseBounds(roundMs = PRODUCTION_ROUND_MS) {
     {
       id: 'RACING',
       startMs: timing.maxWaitMs + timing.gridMs,
-      endMs: timing.maxWaitMs + timing.gridMs + timing.encounterMs * timing.totalEncounters,
+      endMs: timing.maxWaitMs + timing.gridMs + timing.encounterMs * timing.maxEncounters,
     },
     {
       id: 'RESULT',
-      startMs: timing.maxWaitMs + timing.gridMs + timing.encounterMs * timing.totalEncounters,
+      startMs: timing.maxWaitMs + timing.gridMs + timing.encounterMs * timing.maxEncounters,
       endMs: maximumHeatRuntime(timing),
     },
   ];

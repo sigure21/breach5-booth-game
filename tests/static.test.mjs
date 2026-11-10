@@ -24,7 +24,7 @@ test('compose keeps one hardened service and the production timing default', asy
     ['MATCH_MIN_WAIT_MS', 30_000],
     ['MATCH_MAX_WAIT_MS', 45_000],
     ['GRID_COUNTDOWN_MS', 5_000],
-    ['ENCOUNTER_DURATION_MS', 18_000],
+    ['ENCOUNTER_DURATION_MS', 15_000],
     ['MIN_ENCOUNTER_MS', 4_000],
     ['RESULT_DURATION_MS', 25_000],
   ]) assert.match(compose, new RegExp(`${name}:\\s*\\$\\{${name}:-${value}\\}`));
@@ -50,7 +50,8 @@ test('catalog exposes three server-selected two-lap circuits with bounded modele
   assert.equal(catalog.circuits.length, 3);
   assert.equal(Object.hasOwn(catalog, 'tracks'), false, 'retired client track catalog leaked');
   assert.equal(catalog.match.totalLaps, 2);
-  assert.equal(catalog.match.totalEncounters, 10);
+  assert.equal(catalog.match.minEncounters, 10);
+  assert.equal(catalog.match.maxEncounters, 15);
   assert.equal(catalog.match.seats, 4);
   assert.equal(catalog.match.minWaitMs, 30_000);
   assert.equal(catalog.match.maxWaitMs, 45_000);
@@ -146,7 +147,7 @@ test('booth verification uses scoped cleanup and audits the seed in both log str
   const booth = await readFile(new URL('tools/booth.mjs', root), 'utf8');
   assert.match(booth, /randomBytes\(32\)\.toString\('hex'\)/);
   assert.match(booth, /open\(path, 'wx', 0o600\)/);
-  for (const value of ['30_000', '45_000', '5_000', '18_000', '4_000', '25_000']) {
+  for (const value of ['30_000', '45_000', '5_000', '15_000', '4_000', '25_000']) {
     assert.match(booth, new RegExp(`productionTiming[\\s\\S]*?${value}`));
   }
   for (const value of ['300', '450', '100', '75']) {

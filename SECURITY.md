@@ -9,20 +9,25 @@
 - 비밀값: `.runtime/booth.env`의 `NITRO_GRID_SEED_SECRET`
 - 외부 미디어: 저장소에 출처와 함께 포함된 애니메이션 패널과 공식 2026 car 사진
 
-브라우저는 `difficulty`, `crewId`, `driverId`, 현재 공개된 `task`와 그 task의 `choice`만 제출할 수 있습니다. circuit, AI racer, 순위, 속도와 energy state는 서버가 정합니다. 임의 코드, URL, 파일 경로, 명령 또는 템플릿은 받지 않습니다.
+브라우저는 allowlist된 `difficulty`, `securityCircuitId`, `crewId`, `driverId`, 현재 공개된 `task`와 그 task의 `choice`만 제출할 수 있습니다. 시각적 race course, AI racer, 순위, 속도와 energy state는 서버가 정합니다. 임의 코드, URL, 파일 경로, 명령 또는 템플릿은 받지 않습니다.
 
 ## 서버 판정
 
 - 문제 덱은 서버 HMAC으로 결정되며 `Math.random()`에 의존하지 않습니다.
 - 제출 전 API에는 `correctOptionId`, 정답 해설 또는 결과 review가 포함되지 않습니다.
+- 문항별 tier·가중치, weighted knowledge score, AI 기준점과 내부 ranking score는 결과 이후에도 공개 API에 포함되지 않습니다.
 - 답변은 현재 phase에 공개된 task와 그 task의 allowlist 선택지에 한해 1회 저장됩니다.
 - `actionId`는 참가자별 멱등성 키입니다. 동일 본문의 재전송은 최초 판정을 그대로 재생하고, 같은 키를 다른 task/choice에 재사용하면 거부합니다.
-- 재접속 시 최초 팀·선수·난이도, 배정된 match/circuit와 deck이 유지됩니다.
+- 재접속 시 최초 팀·선수·보안 서킷·난이도, 배정된 match/race course와 deck이 유지됩니다.
+- matchmaking open heat는 `(difficulty, securityCircuitId)`가 정확히 같은 요청에만 재사용됩니다. 둘 중 하나라도 다르면 별도 heat를 생성합니다.
+- 같은 heat의 모든 사람과 AI는 동일한 문제 ID, race phase, 선택지 순서, 정답과 서버 전용 배점을 사용합니다.
 - matchmaking은 정확히 4 seat로 닫히며, 45초 deadline의 빈 seat만 서버가 deterministic AI로 채웁니다.
+- 인증된 참가자가 즉시 출발을 요청해도 bearer가 속한 최신 heat의 사람을 모두 보존하고 남은 seat만 채웁니다. 요청 본문의 heat ID나 AI 수는 신뢰하지 않습니다.
 - 다섯 번째 사람은 진행 중 match에 추가되지 않고 다음 open match로 배정됩니다.
 - AI 선택과 race 결과는 서버 HMAC seed에서 계산되며 클라이언트 입력으로 덮어쓸 수 없습니다.
+- 오답·시간 초과 7개 이상인 사람과 AI는 `RETIRED`이고 `position`은 `null`입니다. 브라우저가 분류 상태를 제출하거나 순위를 복구할 수 없습니다.
 
-정답은 비밀 플래그가 아닙니다. 문제은행은 교육 콘텐츠이므로 저장소 소스에서 읽을 수 있습니다. 행사 중 브라우저 API가 조기 노출하지 않는 것이 위협 경계입니다.
+정답과 점수 상수는 비밀 플래그가 아닙니다. 문제은행과 서버 코드는 public 저장소 소스에서 읽을 수 있습니다. 행사 중 정상 브라우저/API가 정답을 조기 노출하거나 내부 점수 필드를 직렬화하지 않는 것이 위협 경계입니다. 소스 열람자에게도 점수를 숨겨야 한다면 비공개 operator configuration과 별도 배포가 필요합니다.
 
 ## 컨테이너 경계
 

@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { QUESTION_BANK } from '../src/content/questions.mjs';
+import { QUESTION_BANKS } from '../src/content/questions.mjs';
 import { GameStore } from '../src/game.mjs';
 import { createGameServer } from '../src/server.mjs';
 
-const answers = new Map(QUESTION_BANK.map((question) => [question.id, question.correctOptionId]));
+const answers = new Map(
+  Object.values(QUESTION_BANKS).flat().map((question) => [question.id, question.correctOptionId]),
+);
 
 async function harness(context, { maxPlayers = 48, seedSecret = 'api-heat-test' } = {}) {
   let now = 0;
@@ -17,6 +19,8 @@ async function harness(context, { maxPlayers = 48, seedSecret = 'api-heat-test' 
     encounterMs: 300,
     minimumExposureMs: 75,
     resultMs: 300,
+    minEncounters: 10,
+    maxEncounters: 10,
     maxPlayers,
     seedSecret,
   });
@@ -50,10 +54,29 @@ function selection(deviceId, overrides = {}) {
   return {
     deviceId,
     difficulty: 'BEGINNER',
+    securityCircuitId: 'FULL_STACK',
     crewId: 'red-bull-racing',
     driverId: 'max-verstappen',
     ...overrides,
   };
+}
+
+function assertPrivateScoringHidden(value) {
+  const forbidden = new Set([
+    'servertier', 'servertiers', 'serverweighttier', 'weighttier', 'weight', 'weights',
+    'points', 'earned', 'earnedweight', 'possibleweight', 'possibleweighted', 'knowledge',
+    'knowledgescore', 'racescore', 'rankingscore', 'internalrankingscore', 'hardp4',
+    'rankvalue', 'aiskill', 'aiordinal', 'airesults', 'rawpoints', 'maxpoints',
+    'wrongcount', 'threshold', 'thresholds',
+  ]);
+  const walk = (entry) => {
+    if (!entry || typeof entry !== 'object') return;
+    for (const [key, child] of Object.entries(entry)) {
+      assert.equal(forbidden.has(key.toLowerCase()), false, `private scoring field leaked: ${key}`);
+      walk(child);
+    }
+  };
+  walk(value);
 }
 
 test('HTTP catalog and join contract remove client track choice and preserve reconnect identity', async (context) => {
@@ -66,11 +89,22 @@ test('HTTP catalog and join contract remove client track choice and preserve rec
   assert.equal(catalogResult.response.status, 200);
   assert.equal(catalogResult.response.headers.get('cache-control'), 'no-store');
   const catalog = catalogResult.value;
+  assertPrivateScoringHidden(catalog);
   assert.equal(catalog.circuits.length, 3);
   assert.equal(Object.hasOwn(catalog, 'tracks'), false);
   assert.deepEqual(catalog.difficulties, ['BEGINNER', 'ADVANCED']);
+  assert.deepEqual(catalog.securityCircuits.map(({ id }) => id), ['WHITE', 'RED', 'BLUE', 'FULL_STACK']);
+  assert.equal(new Set(catalog.securityCircuits.map(({ id }) => id)).size, 4);
+  assert.match(catalog.securityCircuits.find(({ id }) => id === 'FULL_STACK').description, /레드.*블루|블루.*레드/);
+  assert.deepEqual(catalog.difficultyDetails.map(({ id, label }) => ({ id, label })), [
+    { id: 'BEGINNER', label: '초급~중급' },
+    { id: 'ADVANCED', label: '고급' },
+  ]);
   assert.equal(catalog.crews.length, 4);
   assert.equal(catalog.drivers.length, 8);
+  assert.ok(catalog.crews.every(({ performanceRating }) => performanceRating >= 84 && performanceRating <= 88));
+  assert.ok(catalog.drivers.every(({ skillRating }) => skillRating >= 84 && skillRating <= 90));
+  assert.match(catalog.balanceDisclaimer, /게임.*밸런스|객관적 평가.*아닙니다/);
   assert.deepEqual(catalog.match, {
     seats: 4,
     minWaitMs: 300,
@@ -79,7 +113,8 @@ test('HTTP catalog and join contract remove client track choice and preserve rec
     encounterMs: 300,
     minimumExposureMs: 75,
     resultMs: 300,
-    totalEncounters: 10,
+    minEncounters: 10,
+    maxEncounters: 15,
     totalLaps: 2,
   });
 
@@ -98,6 +133,7 @@ test('HTTP catalog and join contract remove client track choice and preserve rec
       trackId: 'attacker-selected-track',
       circuitId: catalog.circuits[2].id,
       difficulty: 'ADVANCED',
+      securityCircuitId: 'RED',
       crewId: 'ferrari',
       driverId: 'charles-leclerc',
     }),
@@ -106,6 +142,7 @@ test('HTTP catalog and join contract remove client track choice and preserve rec
   const identity = joinResult.value;
   assert.match(identity.token, /^[A-Za-z0-9_-]{32}$/);
   assert.equal(identity.circuitId, catalog.circuits[0].id, 'server circuit rotation was overridden');
+  assert.equal(identity.securityCircuitId, 'RED');
   assert.equal(Object.hasOwn(identity, 'trackId'), false);
 
   const reconnect = await request(origin, '/api/join', {
@@ -122,6 +159,8 @@ test('HTTP catalog and join contract remove client track choice and preserve rec
     [selection('3'.repeat(32), { crewId: 'invented-crew' }), 'invalid_crew'],
     [selection('4'.repeat(32), { driverId: 'invented-driver' }), 'invalid_driver'],
     [selection('5'.repeat(32), { driverId: 'george-russell' }), 'invalid_driver'],
+    [selection('6'.repeat(32), { securityCircuitId: 'PURPLE' }), 'invalid_security_circuit'],
+    [selection('7'.repeat(32), { securityCircuitId: undefined }), 'invalid_security_circuit'],
     [selection('bad'), 'invalid_device_id'],
   ]) {
     const invalid = await request(origin, '/api/join', { method: 'POST', body });
@@ -140,6 +179,7 @@ test('HTTP catalog and join contract remove client track choice and preserve rec
   assert.equal(stateResult.value.match.circuit.id, catalog.circuits[0].id);
   assert.equal(stateResult.value.tasks.length, 1);
   assert.doesNotMatch(JSON.stringify(stateResult.value.tasks), /correctOptionId|explanation|takeaway/);
+  assertPrivateScoringHidden(stateResult.value);
 
   const task = stateResult.value.tasks[0];
   const wrongChoice = task.options.find(({ id }) => id !== answers.get(task.id)).id;
@@ -156,6 +196,7 @@ test('HTTP catalog and join contract remove client track choice and preserve rec
   assert.equal(action.value.feedback.correct, false);
   assert.equal(action.value.feedback.correctOptionId, answers.get(task.id));
   assert.match(action.value.feedback.explanation, /\S/);
+  assertPrivateScoringHidden(action.value);
 
   const duplicate = await request(origin, '/api/action', {
     token: identity.token, method: 'POST', body: actionBody,
@@ -176,6 +217,7 @@ test('HTTP catalog and join contract remove client track choice and preserve rec
   assert.equal(screen.value.pending.length, 0);
   assert.equal(screen.value.active.length, 1);
   assert.equal(screen.value.active[0].standings.length, 4);
+  assertPrivateScoringHidden(screen.value);
   const qr = await fetch(`${origin}/api/qr.svg`);
   assert.equal(qr.status, 200);
   assert.match(await qr.text(), /^<svg/);
@@ -204,6 +246,112 @@ test('HTTP heat assignment starts exact four after minimum and puts fifth in nex
   assert.equal(first.match.aiCount, 0);
   assert.equal(first.race.racers.length, 4);
   assert.equal(fifth.match.status, 'MATCHING');
+});
+
+test('HTTP queue isolates exact difficulty and security circuit profiles', async (context) => {
+  const { origin } = await harness(context, { seedSecret: 'api-profile-isolation' });
+  const joinProfile = async (deviceId, difficulty, securityCircuitId, extra = {}) => (
+    await request(origin, '/api/join', {
+      method: 'POST', body: selection(deviceId, { difficulty, securityCircuitId, ...extra }),
+    })
+  ).value;
+  const first = await joinProfile('8'.repeat(32), 'BEGINNER', 'FULL_STACK');
+  const differentDifficulty = await joinProfile('9'.repeat(32), 'ADVANCED', 'FULL_STACK');
+  const differentCircuit = await joinProfile('a'.repeat(32), 'BEGINNER', 'RED');
+  const sameProfile = await joinProfile('b'.repeat(32), 'BEGINNER', 'FULL_STACK', {
+    crewId: 'mercedes',
+    driverId: 'george-russell',
+    circuitId: 'client-course-must-not-split-the-queue',
+  });
+  assert.equal(first.matchId, sameProfile.matchId);
+  assert.notEqual(first.matchId, differentDifficulty.matchId);
+  assert.notEqual(first.matchId, differentCircuit.matchId);
+  assert.notEqual(differentDifficulty.matchId, differentCircuit.matchId);
+
+  const screen = (await request(origin, '/api/screen-state')).value;
+  assert.equal(screen.pending.length, 3);
+  const firstHeat = screen.pending.find(({ matchId }) => matchId === first.matchId);
+  assert.equal(firstHeat.difficulty, 'BEGINNER');
+  assert.equal(firstHeat.securityCircuitId, 'FULL_STACK');
+  assert.equal(firstHeat.humanCount, 2);
+  await request(origin, '/api/start-with-ai', { token: first.token, method: 'POST', body: {} });
+  const launched = (await request(origin, '/api/state', { token: first.token })).value;
+  assert.ok(launched.race.racers.every(({ difficulty, securityCircuitId }) => (
+    difficulty === 'BEGINNER' && securityCircuitId === 'FULL_STACK'
+  )));
+});
+
+test('HTTP manual AI fill is authenticated and uses the latest one-to-three-human heat', async (context) => {
+  const { origin } = await harness(context, { seedSecret: 'api-manual-fill' });
+  for (const token of [undefined, 'invalid-token']) {
+    const unauthorized = await request(origin, '/api/start-with-ai', {
+      token,
+      method: 'POST',
+      body: {},
+    });
+    assert.equal(unauthorized.response.status, 401);
+    assert.deepEqual(unauthorized.value, { error: 'unauthorized' });
+  }
+
+  let deviceOrdinal = 20;
+  for (const humans of [1, 2, 3]) {
+    const racers = [];
+    for (let index = 0; index < humans; index += 1) {
+      const joined = await request(origin, '/api/join', {
+        method: 'POST',
+        body: selection((deviceOrdinal++).toString(16).padStart(32, '0')),
+      });
+      racers.push(joined.value);
+    }
+    assert.equal(new Set(racers.map(({ matchId }) => matchId)).size, 1);
+    const launched = await request(origin, '/api/start-with-ai', {
+      token: racers[0].token,
+      method: 'POST',
+      body: humans === 3 ? { matchId: 'attacker-selected-heat', aiCount: 3 } : {},
+    });
+    assert.equal(launched.response.status, 200);
+    assert.equal(launched.value.ok, true);
+    assert.equal(launched.value.match.status, 'GRID');
+    assert.equal(launched.value.match.humanCount, humans);
+    assert.equal(launched.value.match.aiCount, 4 - humans);
+
+    const state = (await request(origin, '/api/state', { token: racers.at(-1).token })).value;
+    assert.equal(state.match.status, 'GRID');
+    assert.equal(state.race.racers.length, 4);
+    assert.equal(state.race.racers.filter(({ isAi }) => isAi).length, 4 - humans);
+    assert.deepEqual(
+      new Set(state.race.racers.filter(({ isAi }) => !isAi).map(({ callsign }) => callsign)),
+      new Set(racers.map(({ callsign }) => callsign)),
+    );
+    const duplicate = await request(origin, '/api/start-with-ai', {
+      token: racers[0].token,
+      method: 'POST',
+      body: {},
+    });
+    assert.equal(duplicate.response.status, 409);
+    assert.deepEqual(duplicate.value, { error: 'solo_start_unavailable' });
+  }
+
+  const full = [];
+  for (let index = 0; index < 4; index += 1) {
+    const joined = await request(origin, '/api/join', {
+      method: 'POST',
+      body: selection((deviceOrdinal++).toString(16).padStart(32, '0')),
+    });
+    full.push(joined.value);
+  }
+  assert.equal(new Set(full.map(({ matchId }) => matchId)).size, 1);
+  const unavailable = await request(origin, '/api/start-with-ai', {
+    token: full[0].token,
+    method: 'POST',
+    body: {},
+  });
+  assert.equal(unavailable.response.status, 409);
+  assert.deepEqual(unavailable.value, { error: 'solo_start_unavailable' });
+  const fullState = (await request(origin, '/api/state', { token: full[3].token })).value;
+  assert.equal(fullState.match.status, 'MATCHING');
+  assert.equal(fullState.match.humanCount, 4);
+  assert.equal(fullState.match.aiCount, 0);
 });
 
 test('HTTP result exposes four ordered racers and ten review entries, then retry opens a new heat', async (context) => {
@@ -235,9 +383,14 @@ test('HTTP result exposes four ordered racers and ten review entries, then retry
   const finished = (await request(origin, '/api/state', { token: identity.token })).value;
   assert.equal(finished.match.status, 'RESULT');
   assert.equal(finished.result.classification.length, 4);
-  assert.deepEqual(finished.result.classification.map(({ position }) => position), [1, 2, 3, 4]);
+  const classifiedPositions = finished.result.classification
+    .filter(({ retired }) => !retired).map(({ position }) => position);
+  assert.deepEqual(classifiedPositions, Array.from({ length: classifiedPositions.length }, (_, index) => index + 1));
+  assert.ok(finished.result.classification.filter(({ retired }) => retired)
+    .every(({ position }) => position === null));
   assert.equal(finished.result.review.length, 10);
   assert.equal(finished.result.correct, 10);
+  assertPrivateScoringHidden(finished);
 
   const match = store.matches.get(identity.matchId);
   await setNow(match.resultEndsAt);
@@ -250,6 +403,69 @@ test('HTTP result exposes four ordered racers and ten review entries, then retry
   assert.equal(retry.response.status, 201);
   assert.notEqual(retry.value.token, identity.token);
   assert.notEqual(retry.value.matchId, identity.matchId);
+});
+
+test('HTTP result and screen state serialize human and AI retirement without a position', async (context) => {
+  const { store, origin } = await harness(context, { seedSecret: 'api-retirement' });
+  const applyAnswers = (identity, correctCount) => {
+    const player = store.players.get(identity.token);
+    const match = store.matches.get(identity.matchId);
+    const deck = store.deckFor(match, player.difficulty, player.securityCircuitId);
+    deck.forEach((question, index) => {
+      const correct = index < correctCount;
+      const choice = correct
+        ? question.correctOptionId
+        : question.options.find(({ id }) => id !== question.correctOptionId).id;
+      match.actions.set(`${player.id}:${question.id}`, {
+        playerId: player.id, task: question.id, choice, correct, at: store.now(),
+      });
+    });
+    return { player, match };
+  };
+
+  const first = (await request(origin, '/api/join', {
+    method: 'POST', body: selection('e'.repeat(32)),
+  })).value;
+  await request(origin, '/api/start-with-ai', { token: first.token, method: 'POST', body: {} });
+  const firstInternal = applyAnswers(first, 3);
+  for (const racer of firstInternal.match.racers.filter(({ isAi }) => isAi)) racer.aiResults.fill(true);
+  store.enterResult(firstInternal.match, store.now());
+
+  const humanRetired = (await request(origin, '/api/state', { token: first.token })).value;
+  assert.equal(humanRetired.result.outcome, 'RETIRED');
+  assert.equal(humanRetired.result.position, null);
+  assert.equal(humanRetired.result.retired, true);
+  assert.equal(humanRetired.result.classificationStatus, 'RETIRED');
+  assert.equal(humanRetired.result.classification.find(({ id }) => id === humanRetired.player.id).position, null);
+  assertPrivateScoringHidden(humanRetired);
+
+  const second = (await request(origin, '/api/join', {
+    method: 'POST', body: selection('f'.repeat(32)),
+  })).value;
+  await request(origin, '/api/start-with-ai', { token: second.token, method: 'POST', body: {} });
+  const secondInternal = applyAnswers(second, 10);
+  const secondAi = secondInternal.match.racers.filter(({ isAi }) => isAi);
+  secondAi[0].aiResults.fill(false);
+  secondAi[0].aiResults.fill(true, 0, 3);
+  secondAi[1].aiResults.fill(true);
+  secondAi[2].aiResults.fill(true);
+  store.enterResult(secondInternal.match, store.now());
+
+  const aiRetired = (await request(origin, '/api/state', { token: second.token })).value;
+  assert.deepEqual(
+    aiRetired.result.classification.filter(({ retired }) => !retired).map(({ position }) => position),
+    [1, 2, 3],
+  );
+  const retiredAiRows = aiRetired.result.classification.filter(({ retired }) => retired);
+  assert.equal(retiredAiRows.length, 1);
+  assert.equal(retiredAiRows[0].isAi, true);
+  assert.equal(retiredAiRows[0].position, null);
+  assert.equal(retiredAiRows[0].classificationStatus, 'RETIRED');
+  const screen = (await request(origin, '/api/screen-state')).value;
+  assert.equal(screen.stats.humanRetirements, 1);
+  assert.equal(screen.stats.aiRetirements, 1);
+  assertPrivateScoringHidden(aiRetired);
+  assertPrivateScoringHidden(screen);
 });
 
 test('HTTP accepts a 48-human burst as twelve heats and rejects only the 49th for capacity', async (context) => {

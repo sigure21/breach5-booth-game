@@ -13,8 +13,14 @@ const STATUS_LABELS = {
 };
 const STABLE_SCREENS = Object.freeze(['garage', 'matching', 'grid', 'racing', 'feedback', 'result', 'complete']);
 const DIFFICULTY_COPY = {
-  BEGINNER: ['초급 · Guided', '근거에 짧은 판단 주석이 표시됩니다.'],
-  ADVANCED: ['고급 · Analyst', '같은 문제를 원문 기술 증거로 읽습니다.'],
+  BEGINNER: ['초급~중급', '핵심 보안 개념과 근거를 단계적으로 판단합니다.'],
+  ADVANCED: ['고급', '원문 기술 증거를 바탕으로 복합 상황을 분석합니다.'],
+};
+const SECURITY_CIRCUIT_COPY = {
+  WHITE: ['화이트 서킷', '허가 범위·안전한 검증·수정 확인'],
+  RED: ['레드 서킷', '공격자 관점·악용 전제·공격 사슬'],
+  BLUE: ['블루 서킷', '탐지·차단·사고 대응·복구'],
+  FULL_STACK: ['풀 스택 서킷', '레드와 블루를 균형 있게 혼합'],
 };
 const TEAM_CARS = {
   'red-bull-racing': { model: 'RB22', media: '/assets/team-cars/red-bull-rb22-2026.webp' },
@@ -34,7 +40,7 @@ let memoryDeviceId = null;
 const pendingChoices = new Map();
 const optionLabels = new Map(savedOptionLabels());
 const dismissedFeedbackTasks = new Set();
-const garage = { difficulty: null, crewId: null, driverId: null };
+const garage = { difficulty: null, securityCircuitId: null, crewId: null, driverId: null };
 
 function sessionGet(key) {
   try { return sessionStorage.getItem(key); } catch { return null; }
@@ -129,6 +135,88 @@ function clamp(value, minimum = 0, maximum = 1) {
   return Math.min(maximum, Math.max(minimum, Number(value) || 0));
 }
 
+function positiveInteger(value, fallback) {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function catalogEncounterRange() {
+  const match = catalog?.match ?? {};
+  const range = match.encounterRange ?? {};
+  const total = positiveInteger(match.totalEncounters, 10);
+  const minimum = positiveInteger(
+    match.minEncounters ?? match.minTotalEncounters ?? match.totalEncountersMin ?? range.min,
+    total,
+  );
+  const maximum = positiveInteger(
+    match.maxEncounters ?? match.maxTotalEncounters ?? match.totalEncountersMax ?? range.max,
+    total,
+  );
+  return { minimum: Math.min(minimum, maximum), maximum: Math.max(minimum, maximum) };
+}
+
+function catalogEncounterLabel() {
+  const { minimum, maximum } = catalogEncounterRange();
+  return minimum === maximum ? String(minimum) : `${minimum}–${maximum}`;
+}
+
+function totalEncounters(current) {
+  const match = matchOf(current);
+  const fallback = catalogEncounterRange().maximum;
+  return positiveInteger(
+    match.totalEncounters ?? current?.race?.possible ?? current?.result?.possible,
+    fallback,
+  );
+}
+
+function encounterNumber(current) {
+  const match = matchOf(current);
+  const total = totalEncounters(current);
+  const number = Number(match.encounterNumber) > 0
+    ? Number(match.encounterNumber)
+    : Number(match.encounterIndex ?? 0) + 1;
+  return clamp(number, 1, total);
+}
+
+function difficultyCopy(difficulty) {
+  const details = catalog?.difficultyDetails;
+  const detail = Array.isArray(details)
+    ? details.find((entry) => entry?.id === difficulty)
+    : details?.[difficulty];
+  if (typeof detail === 'string') return [DIFFICULTY_COPY[difficulty]?.[0] ?? difficulty, detail];
+  if (detail && typeof detail === 'object') {
+    return [
+      detail.label ?? detail.name ?? DIFFICULTY_COPY[difficulty]?.[0] ?? difficulty,
+      detail.description ?? detail.detail ?? detail.summary ?? DIFFICULTY_COPY[difficulty]?.[1] ?? '',
+    ];
+  }
+  return DIFFICULTY_COPY[difficulty] ?? [difficulty, '난이도 설명이 제공되지 않았습니다.'];
+}
+
+function securityCircuitCopy(id) {
+  const detail = (catalog?.securityCircuits ?? []).find((entry) => entry?.id === id);
+  return [
+    detail?.label ?? SECURITY_CIRCUIT_COPY[id]?.[0] ?? id,
+    detail?.description ?? SECURITY_CIRCUIT_COPY[id]?.[1] ?? '',
+  ];
+}
+
+function securityCircuitFor(id) {
+  return (catalog?.securityCircuits ?? []).find((entry) => entry.id === id) ?? null;
+}
+
+function ratingText(value) {
+  if (value == null) return '—';
+  if (typeof value === 'number' || typeof value === 'string') return String(value);
+  if (typeof value === 'object') {
+    const score = value.value ?? value.score ?? value.rating ?? value.total;
+    const maximum = value.max ?? value.maximum ?? value.outOf;
+    if (score != null) return maximum != null ? `${score}/${maximum}` : String(score);
+    if (value.label != null) return String(value.label);
+  }
+  return '—';
+}
+
 function setText(selector, value) {
   const node = document.querySelector(selector);
   if (node) node.textContent = String(value);
@@ -146,9 +234,28 @@ function circuitOf(current) {
   return matchOf(current).circuit ?? current?.circuit ?? current?.track ?? catalog?.circuits?.[0] ?? {};
 }
 
+function isRetired(racer) {
+  return racer?.retired === true || racer?.classificationStatus === 'RETIRED' || racer?.outcome === 'RETIRED';
+}
+
+function positionLabel(racer, fallback = '–') {
+  return isRetired(racer) ? 'RET' : `P${racer?.position ?? fallback}`;
+}
+
+function gapLabel(racer) {
+  if (isRetired(racer)) return 'RETIRED';
+  return racer?.position === 1 ? 'LEADER' : `+${Math.max(0, Math.round(racer?.gapMeters ?? 0))}m`;
+}
+
 function racersOf(current) {
   const racers = current?.race?.racers ?? matchOf(current).racers ?? current?.racers ?? [];
-  return [...racers].sort((left, right) => (left.position ?? 99) - (right.position ?? 99));
+  return [...racers].sort((left, right) => (
+    Number(isRetired(left)) - Number(isRetired(right))
+    || (left.position ?? 99) - (right.position ?? 99)
+    || Number(left.isAi === true) - Number(right.isAi === true)
+    || (left.seat ?? 99) - (right.seat ?? 99)
+    || String(left.id ?? left.callsign ?? '').localeCompare(String(right.id ?? right.callsign ?? ''))
+  ));
 }
 
 function myRacer(current) {
@@ -223,7 +330,7 @@ function selectionButton({ id, className, selected, label, detail, image, onClic
       img.remove();
     }, { once: true });
     button.append(img);
-  }
+  } else button.classList.add('media-missing');
   const copy = element('span', 'selection-copy');
   copy.append(element('strong', '', label), element('small', '', detail));
   button.append(copy);
@@ -233,7 +340,7 @@ function selectionButton({ id, className, selected, label, detail, image, onClic
 
 function garageComplete() {
   const driver = driverFor(garage.driverId);
-  return Boolean(garage.difficulty && garage.crewId && driver?.crewId === garage.crewId);
+  return Boolean(garage.difficulty && garage.securityCircuitId && garage.crewId && driver?.crewId === garage.crewId);
 }
 
 function renderLobby({ focusId = null } = {}) {
@@ -244,10 +351,10 @@ function renderLobby({ focusId = null } = {}) {
   hero.append(
     element('div', 'eyebrow', '4-CAR SECURITY SPRINT · 2 LAPS'),
     element('h1', '', '증거를 읽고\n트랙에서 추월하라.'),
-    element('p', 'lead', '4대가 같은 서킷에서 10개의 보안 판단으로 겨룹니다. 30–45초 동안 참가자를 모으고, 빈자리는 AI 드라이버가 채웁니다.'),
+    element('p', 'lead', `같은 난이도와 보안 서킷을 고른 4대가 ${catalogEncounterLabel()}개의 판단으로 겨룹니다. 30–45초 동안 참가자를 모으고, 빈자리는 같은 조건의 AI가 채웁니다.`),
   );
   const rules = element('div', 'quick-rules');
-  [['04', '한 경기 차량'], ['10', '보안 인카운터'], ['00:45', '최대 매칭']].forEach(([value, label]) => {
+  [['04', '한 경기 차량'], [catalogEncounterLabel(), '보안 인카운터'], ['00:45', '최대 매칭']].forEach(([value, label]) => {
     const item = element('div');
     item.append(element('strong', '', value), element('span', '', label));
     rules.append(item);
@@ -256,7 +363,7 @@ function renderLobby({ focusId = null } = {}) {
 
   const form = element('article', 'garage-card');
   const crewSection = element('section', 'garage-section');
-  crewSection.append(element('div', 'section-number', '01'), element('h2', '', '팀 선택'), element('p', 'section-help', '차량 성능은 동일합니다. 좋아하는 리버리를 고르세요.'));
+  crewSection.append(element('div', 'section-number', '01'), element('h2', '', '팀 선택'), element('p', 'section-help', '팀 특성과 GAME PERF가 레이스 점수에 작게 반영됩니다. 보안 판단이 가장 큰 비중을 차지합니다.'));
   const crewGrid = element('div', 'crew-grid');
   for (const crew of catalog?.crews ?? []) {
     const fallbackCar = TEAM_CARS[crew.id] ?? {};
@@ -269,7 +376,7 @@ function renderLobby({ focusId = null } = {}) {
       className: `crew-card crew-${crew.id}`,
       selected: garage.crewId === crew.id,
       label: crew.name,
-      detail: `${car.model} · ${crew.trait ?? '2026 race car'}`,
+      detail: `${car.model} · ${crew.trait ?? 'GAME BALANCE'} · GAME PERF ${ratingText(crew.performanceRating)}`,
       image: car.media ? { src: car.media, alt: `${crew.name} ${car.model} 2026 머신` } : null,
       onClick: () => {
         garage.crewId = crew.id;
@@ -293,19 +400,47 @@ function renderLobby({ focusId = null } = {}) {
         className: `driver-card crew-${driver.crewId}`,
         selected: garage.driverId === driver.id,
         label: driver.name,
-        detail: `#${driver.number ?? '—'} · ${driver.country ?? ''}`,
+        detail: `#${driver.number ?? '—'} · ${driver.country ?? ''} · GAME SKILL ${ratingText(driver.skillRating)}`,
         image: reduceMotion() ? null : { src: driverMedia(driver), alt: `${driver.name} 애니메이션 패널` },
         onClick: () => { garage.driverId = driver.id; renderLobby({ focusId: `driver-${driver.id}` }); },
       }));
     }
   }
   driverSection.append(driverGrid);
+  driverSection.append(element('p', 'rating-disclaimer', catalog?.balanceDisclaimer ?? '행사 밸런스 수치 · 실제 시즌 성적이나 공식 평가가 아닙니다.'));
+
+  const securityCircuitSection = element('section', 'garage-section');
+  securityCircuitSection.append(
+    element('div', 'section-number', '03'),
+    element('h2', '', '보안 서킷 선택'),
+    element('p', 'section-help', '같은 서킷과 난이도를 선택한 참가자끼리만 한 heat에 배정됩니다.'),
+  );
+  const securityCircuitGrid = element('div', 'security-circuit-grid');
+  for (const securityCircuit of catalog?.securityCircuits ?? Object.keys(SECURITY_CIRCUIT_COPY).map((id) => ({ id }))) {
+    const [label, detail] = securityCircuitCopy(securityCircuit.id);
+    securityCircuitGrid.append(selectionButton({
+      id: `security-circuit-${securityCircuit.id.toLowerCase().replace('_', '-')}`,
+      className: `security-circuit-card circuit-${securityCircuit.id.toLowerCase().replace('_', '-')}`,
+      selected: garage.securityCircuitId === securityCircuit.id,
+      label,
+      detail,
+      onClick: () => {
+        garage.securityCircuitId = securityCircuit.id;
+        renderLobby({ focusId: `security-circuit-${securityCircuit.id.toLowerCase().replace('_', '-')}` });
+      },
+    }));
+  }
+  securityCircuitSection.append(securityCircuitGrid);
 
   const difficultySection = element('section', 'garage-section');
-  difficultySection.append(element('div', 'section-number', '03'), element('h2', '', '난이도 선택'));
+  difficultySection.append(
+    element('div', 'section-number', '04'),
+    element('h2', '', '난이도 선택'),
+    element('p', 'section-help', '난이도가 다르면 별도 heat로 매칭됩니다.'),
+  );
   const difficultyGrid = element('div', 'difficulty-grid');
   for (const difficulty of catalog?.difficulties ?? ['BEGINNER', 'ADVANCED']) {
-    const [label, detail] = DIFFICULTY_COPY[difficulty] ?? [difficulty, '정답과 점수는 같습니다.'];
+    const [label, detail] = difficultyCopy(difficulty);
     difficultyGrid.append(selectionButton({
       id: `difficulty-${difficulty.toLowerCase()}`,
       className: 'difficulty-card', selected: garage.difficulty === difficulty,
@@ -315,12 +450,12 @@ function renderLobby({ focusId = null } = {}) {
   }
   difficultySection.append(difficultyGrid);
 
-  const join = element('button', 'primary-button', garageComplete() ? 'FIND RACE · 4대 매칭 시작' : '팀 · 드라이버 · 난이도를 선택하세요');
+  const join = element('button', 'primary-button', garageComplete() ? 'FIND RACE · 동일 조건 4대 매칭' : '팀 · 드라이버 · 서킷 · 난이도를 선택하세요');
   join.id = 'join-button';
   join.type = 'button';
   join.disabled = !garageComplete();
   join.addEventListener('click', joinRace);
-  form.append(crewSection, driverSection, difficultySection, join);
+  form.append(crewSection, driverSection, securityCircuitSection, difficultySection, join);
   form.append(element('p', 'privacy-note', '계정이나 이름은 받지 않습니다. 45초 안에 4명이 모이지 않으면 AI가 자동 합류합니다.'));
   app.append(hero, form);
   if (focusId) requestAnimationFrame(() => document.getElementById(focusId)?.focus({ preventScroll: true }));
@@ -358,21 +493,30 @@ async function joinRace() {
       capacity: '모든 매칭 슬롯이 찼습니다. 잠시 뒤 다시 시도해 주세요.',
       invalid_crew: '선택한 팀을 사용할 수 없습니다.',
       invalid_driver: '선택한 드라이버를 사용할 수 없습니다.',
+      invalid_security_circuit: '선택한 보안 서킷을 사용할 수 없습니다.',
       invalid_difficulty: '선택한 난이도를 사용할 수 없습니다.',
       join_rate_limited: '동시 입장이 많습니다. 잠시 뒤 다시 눌러 주세요.',
     };
     setNotice(messages[error.code] ?? '매칭에 실패했습니다. 연결을 확인해 주세요.');
     renderLobby();
-  } finally { busy = false; }
+  } finally {
+    busy = false;
+    const solo = document.querySelector('[data-testid="solo-start-ai"]');
+    if (solo) solo.disabled = false;
+  }
 }
 
 function identityBar(current) {
   const match = matchOf(current);
   const circuit = circuitOf(current);
   const crew = current.player?.crew?.name ?? crewFor(current.player?.crewId)?.name ?? 'TEAM';
+  const securityCircuit = securityCircuitFor(current.player?.securityCircuitId);
   const bar = element('header', 'race-identity');
   const identity = element('div');
-  identity.append(element('span', '', `${crew} · ${circuit.shortLabel ?? circuit.name ?? 'CIRCUIT'}`), element('strong', '', current.player?.callsign ?? 'DRIVER'));
+  identity.append(
+    element('span', '', `${securityCircuit?.shortLabel ?? current.player?.securityCircuitId ?? 'SECURITY'} · ${circuit.shortLabel ?? circuit.name ?? 'COURSE'}`),
+    element('strong', '', `${current.player?.callsign ?? 'DRIVER'} · ${crew}`),
+  );
   const timer = element('div', 'race-timer');
   timer.append(element('span', '', STATUS_LABELS[statusOf(current)] ?? statusOf(current)), element('b', '', formatTime(displayRemainingMs(current))));
   timer.querySelector('b').id = 'race-clock';
@@ -389,12 +533,21 @@ function queueRacers(current) {
   return { slots: slots.slice(0, 4), humanCount, aiCount };
 }
 
+function soloStartLabel(humanCount) {
+  return `남은 ${Math.max(1, 4 - Number(humanCount || 0))}자리에 AI 투입 · 바로 출발`;
+}
+
 function renderMatchmaking(current) {
   const match = matchOf(current);
   const { slots, humanCount } = queueRacers(current);
+  const securityCircuit = securityCircuitFor(match.securityCircuitId ?? current.player?.securityCircuitId);
+  const [difficultyLabel] = difficultyCopy(match.difficulty ?? current.player?.difficulty);
   const card = element('article', 'match-card');
   card.append(element('div', 'eyebrow', 'MATCHMAKING · EXACTLY 4 CARS'), element('h1', '', `${humanCount}/4 드라이버 준비`));
-  card.append(element('p', 'match-copy', '최소 30초 동안 참가자를 기다립니다. 4명이 모이면 출발하고, 45초가 되면 빈자리를 AI가 채웁니다.'));
+  card.append(
+    element('p', 'match-ruleset', `${securityCircuit?.label ?? current.player?.securityCircuitId ?? 'SECURITY'} · ${difficultyLabel}`),
+    element('p', 'match-copy', '같은 서킷·난이도의 참가자만 합류합니다. 4명이 모이면 출발하고, 45초가 되면 같은 조건의 AI가 빈자리를 채웁니다.'),
+  );
   const grid = element('div', 'match-grid');
   grid.dataset.testid = 'match-grid';
   slots.forEach((racer, index) => {
@@ -419,7 +572,47 @@ function renderMatchmaking(current) {
   max.querySelector('b').id = 'match-clock';
   timing.append(min, max);
   card.append(timing, element('p', 'match-footnote', '매칭 창을 닫아도 같은 브라우저로 다시 열면 현재 그리드에 복귀합니다.'));
+  if (humanCount >= 1 && humanCount < 4) {
+    const solo = element('button', 'solo-start-button', soloStartLabel(humanCount));
+    solo.type = 'button';
+    solo.dataset.testid = 'solo-start-ai';
+    solo.dataset.humanCount = String(humanCount);
+    solo.disabled = busy;
+    solo.addEventListener('click', startWithAi);
+    card.append(solo);
+  }
   return card;
+}
+
+async function startWithAi() {
+  if (busy || !playerToken || statusOf(state) !== 'MATCHING') return;
+  busy = true;
+  setNotice();
+  const button = document.querySelector('[data-testid="solo-start-ai"]');
+  if (button) {
+    button.disabled = true;
+    button.textContent = 'AI 드라이버 호출 중…';
+  }
+  try {
+    await api('/api/start-with-ai', { method: 'POST' });
+    renderKey = '';
+    await refresh();
+  } catch (error) {
+    if (error.status === 409 && error.code === 'solo_start_unavailable') {
+      setNotice('그리드 인원이 바뀌어 최신 매칭 상태로 갱신했습니다.');
+    } else {
+      setNotice('AI 드라이버 호출에 실패했습니다. 일반 매칭을 계속합니다.');
+    }
+    renderKey = '';
+    await refresh();
+  } finally {
+    busy = false;
+    const currentButton = document.querySelector('[data-testid="solo-start-ai"]');
+    if (currentButton) {
+      currentButton.disabled = false;
+      currentButton.textContent = soloStartLabel(currentButton.dataset.humanCount);
+    }
+  }
 }
 
 function createTrackMap(current, className = '') {
@@ -465,7 +658,7 @@ function createTrackMap(current, className = '') {
     text.setAttribute('x', '-48');
     text.setAttribute('y', '4');
     text.setAttribute('text-anchor', 'middle');
-    text.textContent = String(racer.position ?? '–');
+    text.textContent = isRetired(racer) ? 'R' : String(racer.position ?? '–');
     marker.append(image, badge, text);
     svg.append(marker);
   }
@@ -478,12 +671,12 @@ function raceStandings(current, resultMode = false) {
   panel.id = resultMode ? 'result-standings' : 'race-standings';
   panel.dataset.testid = resultMode ? 'result-leaderboard' : 'leaderboard';
   for (const racer of racersOf(current)) {
-    const row = element('article', `standing-row${racer.isPlayer ? ' me' : ''}${racer.isAi ? ' ai' : ''}`);
+    const row = element('article', `standing-row${racer.isPlayer ? ' me' : ''}${racer.isAi ? ' ai' : ''}${isRetired(racer) ? ' retired' : ''}`);
     row.dataset.racerId = racer.id ?? racer.callsign;
-    const position = element('b', 'standing-position', `P${racer.position ?? '–'}`);
+    const position = element('b', 'standing-position', positionLabel(racer));
     const copy = element('div');
     copy.append(element('strong', '', racerName(racer)), element('small', '', racer.isAi ? 'AI' : driverFor(racer.driverId)?.name ?? 'HUMAN'));
-    const gap = element('span', 'standing-gap', racer.position === 1 ? 'LEADER' : `+${Math.max(0, Math.round(racer.gapMeters ?? 0))}m`);
+    const gap = element('span', 'standing-gap', gapLabel(racer));
     row.append(position, copy, gap);
     panel.append(row);
   }
@@ -494,6 +687,8 @@ function raceDashboard(current) {
   const circuit = circuitOf(current);
   const race = current.race ?? {};
   const me = myRacer(current) ?? race;
+  const total = totalEncounters(current);
+  const gate = encounterNumber(current);
   const dashboard = element('article', 'race-dashboard');
   const head = element('header', 'circuit-head');
   const copy = element('div');
@@ -518,16 +713,16 @@ function raceDashboard(current) {
   const trackProgress = clamp(me.trackProgress ?? me.progress ?? race.trackProgress ?? race.progress, 0, 0.9999);
   const gapMeters = Math.max(0, Math.round(me.gapMeters ?? race.gapMeters ?? 0));
   const entries = [
-    ['POSITION', `P${me.position ?? race.position ?? '–'}`, 'race-position'],
+    ['POSITION', isRetired(me) || isRetired(race) ? 'RET' : `P${me.position ?? race.position ?? '–'}`, 'race-position'],
     ['LAP', `${me.lap ?? race.lap ?? 1}/${race.totalLaps ?? 2}`, 'race-lap'],
-    ['GAP', (me.position ?? race.position) === 1 ? 'LEADER' : `+${gapMeters}m`, 'race-gap'],
+    ['GAP', isRetired(me) || isRetired(race) ? 'RETIRED' : ((me.position ?? race.position) === 1 ? 'LEADER' : `+${gapMeters}m`), 'race-gap'],
     ['BATTERY / RECHARGE', `${Math.round(me.batteryPercent ?? race.batteryPercent ?? 0)}%`, 'race-battery'],
     ['BOOST MODE', me.boostMode ?? race.boostMode ? 'ACTIVE' : 'READY', 'race-boost'],
     ['OVERTAKE MODE', me.overtakeMode ?? race.overtakeMode ? 'ACTIVE' : 'LOCKED', 'race-overtake'],
     ['ACTIVE AERO', me.activeAero ?? race.activeAero ? 'ACTIVE' : 'BALANCED', 'race-aero'],
     ['PIT', (me.pitTimeMs ?? race.pitTimeMs) ? `${((me.pitTimeMs ?? race.pitTimeMs) / 1000).toFixed(1)}s` : '—', 'race-pit'],
     ['SECTOR', `S${Math.floor(trackProgress * 3) + 1}`, 'race-sector'],
-    ['GATE', `${Math.min(10, (matchOf(current).encounterIndex ?? 0) + 1)}/10`, 'race-gate'],
+    ['GATE', `${gate}/${total}`, 'race-gate'],
   ];
   for (const [label, value, id] of entries) {
     const cell = element('div');
@@ -538,9 +733,9 @@ function raceDashboard(current) {
   telemetry.append(speed, cells);
   dashboard.append(telemetry, raceStandings(current));
   const strip = element('ol', 'encounter-strip');
-  strip.setAttribute('aria-label', '10개 보안 인카운터 진행 상황');
+  strip.setAttribute('aria-label', `${total}개 보안 인카운터 진행 상황`);
   const currentIndex = matchOf(current).encounterIndex ?? current.race?.answered ?? 0;
-  for (let index = 0; index < 10; index += 1) {
+  for (let index = 0; index < total; index += 1) {
     const item = element('li', index < currentIndex ? 'done' : index === currentIndex ? 'current' : '', String(index + 1));
     strip.append(item);
   }
@@ -600,7 +795,7 @@ function startLights(current) {
   card.append(element('div', 'eyebrow', 'GRID LOCKED · 4 CARS'), element('h1', '', 'LIGHTS OUT을 준비하세요.'));
   const lights = element('div', 'start-lights');
   for (let index = 0; index < 5; index += 1) lights.append(element('i', index < active ? 'on' : ''));
-  card.append(lights, element('strong', 'start-countdown', formatTime(remaining)), element('p', '', '10개의 보안 판단이 랩타임, BATTERY, BOOST와 피트 손실을 결정합니다.'));
+  card.append(lights, element('strong', 'start-countdown', formatTime(remaining)), element('p', '', `${totalEncounters(current)}개의 보안 판단이 랩타임, BATTERY, BOOST와 피트 손실을 결정합니다.`));
   card.querySelector('.start-countdown').id = 'grid-clock';
   return card;
 }
@@ -624,12 +819,15 @@ function taskCard(current, task) {
   rememberOptionLabels(task);
   const selected = pendingChoices.get(task.id) ?? task.selected ?? null;
   const locked = task.selected != null;
-  const encounter = task.gridPosition ?? (matchOf(current).encounterIndex ?? 0) + 1;
+  const encounter = encounterNumber(current);
+  const total = totalEncounters(current);
   const card = element('article', 'encounter-card');
   card.dataset.testid = 'encounter-card';
   const head = element('div', 'encounter-head');
-  head.append(element('span', '', `SECURITY GATE ${encounter}/10`), element('b', '', task.categoryLabel ?? task.category ?? 'RACE CONTROL'));
-  card.append(head, element('h2', '', task.question ?? task.prompt ?? task.title ?? '대응을 선택하세요.'), evidencePanel(task));
+  head.append(element('span', '', `SECURITY GATE ${encounter}/${total}`), element('b', '', task.categoryLabel ?? task.category ?? 'RACE CONTROL'));
+  card.append(head);
+  if (task.decisionFrame) card.append(element('p', 'decision-frame', task.decisionFrame));
+  card.append(element('h2', '', task.question ?? task.prompt ?? task.title ?? '대응을 선택하세요.'), evidencePanel(task));
   const list = element('div', 'answer-list');
   for (const option of task.options ?? []) {
     const button = element('button', `answer-card${selected === option.id ? ' selected' : ''}`);
@@ -756,9 +954,9 @@ function feedbackPanel(current) {
 }
 
 function waitingForGate(current) {
-  const match = matchOf(current);
+  const total = totalEncounters(current);
   const card = element('article', 'waiting-card');
-  card.append(element('div', 'eyebrow', `SECURITY GATE ${Math.min(10, (match.encounterIndex ?? 0) + 1)}/10`));
+  card.append(element('div', 'eyebrow', `SECURITY GATE ${encounterNumber(current)}/${total}`));
   card.append(element('h2', '', '다른 차량의 무전을 기다립니다.'), element('p', '', '정답은 이미 반영됐습니다. 머신은 계속 달리고 다음 Gate가 열리면 자동으로 이동합니다.'));
   const pulse = element('div', 'radio-pulse');
   pulse.append(element('i'), element('span', '', 'RACE CONTROL SYNC'));
@@ -766,12 +964,12 @@ function waitingForGate(current) {
   return card;
 }
 
-function resultReview(result) {
+function resultReview(result, total) {
   const rows = result?.review ?? [];
   if (!rows.length) return null;
   const section = element('section', 'result-review');
   section.dataset.testid = 'result-review';
-  section.append(element('h2', '', `10개 판단 복기 · ${rows.length}/10`));
+  section.append(element('h2', '', `${total}개 판단 복기 · ${rows.length}/${total}`));
   const list = element('div', 'result-review-list');
   rows.forEach((row, index) => {
     const item = element('article', `review-item ${row.correct ? 'correct' : 'wrong'}`);
@@ -800,17 +998,25 @@ function resultReview(result) {
 function resultPanel(current) {
   const result = current.result ?? {};
   const race = current.race ?? {};
-  const position = result.position ?? race.position ?? myRacer(current)?.position ?? '–';
+  const total = positiveInteger(result.possible ?? race.possible, totalEncounters(current));
+  const playerRacer = myRacer(current);
+  const retired = isRetired(result) || isRetired(race) || isRetired(playerRacer);
+  const position = result.position ?? race.position ?? playerRacer?.position ?? '–';
   const card = element('article', 'result-card');
   card.dataset.testid = 'result-card';
-  card.append(element('div', 'result-kicker', 'CHEQUERED FLAG'), element('h1', '', `P${position} FINISH`));
-  card.append(element('p', 'lead', position === 1 ? '보안 판단과 레이스 운영 모두 선두였습니다.' : '순위보다 놓친 근거를 복기하면 다음 레이스가 빨라집니다.'));
+  card.classList.toggle('retired', retired);
+  card.append(
+    element('div', 'result-kicker', retired ? 'RACE CONTROL' : 'CHEQUERED FLAG'),
+    element('h1', '', retired ? 'RETIRED' : `P${position} FINISH`),
+  );
+  card.append(element('p', 'lead', retired
+    ? '7개 이상 오답 또는 시간 초과로 순위 없이 레이스에서 탈락했습니다.'
+    : (position === 1 ? '보안 판단과 레이스 운영 모두 선두였습니다.' : '순위보다 놓친 근거를 복기하면 다음 레이스가 빨라집니다.')));
   card.append(raceStandings(current, true));
   const scores = element('div', 'result-score-grid');
   const values = [
-    [`${race.correct ?? result.correct ?? 0}/10`, '정답'],
-    [`${race.accuracy ?? result.accuracy ?? 0}%`, '정확도'],
-    [`P${position}`, '최종 순위'],
+    [`${race.correct ?? result.correct ?? 0}/${total}`, '정답'],
+    [retired ? 'RET' : `P${position}`, retired ? '분류' : '최종 순위'],
   ];
   for (const [value, label] of values) {
     const cell = element('div');
@@ -818,7 +1024,7 @@ function resultPanel(current) {
     scores.append(cell);
   }
   card.append(scores);
-  const review = resultReview(result);
+  const review = resultReview(result, total);
   if (review) card.append(review);
   const again = element('button', 'primary-button', '새 4-CAR 매칭 시작');
   again.type = 'button';
@@ -912,7 +1118,7 @@ function updateTrackMarkers(current) {
     const tangentY = dy / magnitude;
     const normalX = -tangentY;
     const normalY = tangentX;
-    const slot = Math.abs(Number(racer.seat ?? racer.position ?? index + 1) - 1) % 4;
+    const slot = Math.abs(Number(racer.seat ?? index + 1) - 1) % 4;
     const tangentOffset = [-42, -14, 14, 42][slot];
     const normalOffset = [-18, 18, -18, 18][slot];
     const x = point.x + tangentX * tangentOffset + normalX * normalOffset;
@@ -920,7 +1126,7 @@ function updateTrackMarkers(current) {
     const angle = Math.atan2(dy, dx) * (180 / Math.PI);
     marker.setAttribute('transform', `translate(${x.toFixed(2)} ${y.toFixed(2)}) rotate(${angle.toFixed(2)})`);
     const label = marker.querySelector('.marker-position');
-    if (label) label.textContent = String(racer.position ?? '–');
+    if (label) label.textContent = isRetired(racer) ? 'R' : String(racer.position ?? '–');
   });
 }
 
@@ -930,8 +1136,9 @@ function updateStandings(current) {
   for (const racer of racersOf(current)) {
     const row = [...panel.querySelectorAll('.standing-row')].find((node) => node.dataset.racerId === String(racer.id ?? racer.callsign));
     if (!row) continue;
-    row.querySelector('.standing-position').textContent = `P${racer.position ?? '–'}`;
-    row.querySelector('.standing-gap').textContent = racer.position === 1 ? 'LEADER' : `+${Math.max(0, Math.round(racer.gapMeters ?? 0))}m`;
+    row.classList.toggle('retired', isRetired(racer));
+    row.querySelector('.standing-position').textContent = positionLabel(racer);
+    row.querySelector('.standing-gap').textContent = gapLabel(racer);
     panel.append(row);
   }
 }
@@ -945,9 +1152,11 @@ function updateLive(current) {
   setText('#match-clock', formatTime(match.maxWaitRemainingMs ?? match.startsInMs ?? 0));
   setText('#grid-clock', formatTime(match.startsInMs ?? 0));
   setText('#race-speed', Math.round(me.speedKph ?? race.speedKph ?? 0));
-  setText('#race-position', `P${me.position ?? race.position ?? '–'}`);
+  setText('#race-position', isRetired(me) || isRetired(race) ? 'RET' : `P${me.position ?? race.position ?? '–'}`);
   setText('#race-lap', `${me.lap ?? race.lap ?? 1}/${race.totalLaps ?? 2}`);
-  setText('#race-gap', (me.position ?? race.position) === 1 ? 'LEADER' : `+${Math.max(0, Math.round(me.gapMeters ?? race.gapMeters ?? 0))}m`);
+  setText('#race-gap', isRetired(me) || isRetired(race)
+    ? 'RETIRED'
+    : ((me.position ?? race.position) === 1 ? 'LEADER' : `+${Math.max(0, Math.round(me.gapMeters ?? race.gapMeters ?? 0))}m`));
   setText('#race-battery', `${Math.round(me.batteryPercent ?? race.batteryPercent ?? 0)}%`);
   setText('#race-boost', me.boostMode ?? race.boostMode ? 'ACTIVE' : 'READY');
   setText('#race-overtake', me.overtakeMode ?? race.overtakeMode ? 'ACTIVE' : 'LOCKED');
@@ -955,7 +1164,7 @@ function updateLive(current) {
   setText('#race-pit', (me.pitTimeMs ?? race.pitTimeMs) ? `${((me.pitTimeMs ?? race.pitTimeMs) / 1000).toFixed(1)}s` : '—');
   const trackProgress = clamp(me.trackProgress ?? me.progress ?? race.trackProgress ?? race.progress, 0, 0.9999);
   setText('#race-sector', `S${Math.floor(trackProgress * 3) + 1}`);
-  setText('#race-gate', `${Math.min(10, (match.encounterIndex ?? 0) + 1)}/10`);
+  setText('#race-gate', `${encounterNumber(current)}/${totalEncounters(current)}`);
   const meter = document.querySelector('#speed-meter');
   if (meter) {
     meter.max = String(circuit.maxSpeedKph ?? 360);

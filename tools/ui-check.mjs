@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync } from 'node:fs';
 import { chromium } from 'playwright-core';
-import { QUESTION_BANK } from '../src/content/questions.mjs';
+import { QUESTION_BANKS } from '../src/content/questions.mjs';
 import { GameStore } from '../src/game.mjs';
 import { CIRCUITS, CREWS, DRIVERS } from '../src/race/catalog.mjs';
 import { createGameServer } from '../src/server.mjs';
@@ -22,7 +22,9 @@ if (!executablePath) {
   process.exit(0);
 }
 
-const answers = new Map(QUESTION_BANK.map((question) => [question.id, question.correctOptionId]));
+const answers = new Map(
+  Object.values(QUESTION_BANKS).flat().map((question) => [question.id, question.correctOptionId]),
+);
 const expectedTeamCars = [
   '/assets/team-cars/red-bull-rb22-2026.webp',
   '/assets/team-cars/ferrari-sf26-2026.webp',
@@ -175,6 +177,7 @@ async function auditHeatFlow() {
     await page.goto(`${harness.origin}/play`);
     await waitScreen(page, 'garage');
     assert.equal(await page.locator('.crew-card').count(), 4);
+    assert.equal(await page.locator('.security-circuit-card').count(), 4);
     assert.equal(await page.locator('.difficulty-card').count(), 2);
     assert.equal(await page.locator('.driver-card').count(), 0);
     assert.equal(await page.locator('#join-button').isDisabled(), true);
@@ -195,6 +198,7 @@ async function auditHeatFlow() {
     assert.equal(await page.locator('.driver-card img').count(), 0, 'reduced motion must omit animated driver panels');
     assert.equal(driverPanelRequests.length, 0, 'reduced motion requested driver WebP media');
     await page.locator('.driver-card').first().click();
+    await page.locator('#security-circuit-full-stack').click();
     await page.locator('.difficulty-card').first().click();
     assert.equal(await page.locator('#join-button').isDisabled(), false);
     await page.locator('#join-button').click();
@@ -207,6 +211,8 @@ async function auditHeatFlow() {
     const token = await page.evaluate(() => sessionStorage.getItem('nitro-grid-player-token'));
     assert.match(token, /^[A-Za-z0-9_-]{32}$/);
     const initialState = await api(harness.origin, '/api/state', { token });
+    const totalEncounters = initialState.match.totalEncounters;
+    assert.ok(totalEncounters >= 10 && totalEncounters <= 15);
     const catalog = await api(harness.origin, '/api/catalog');
     for (let index = 0; index < 3; index += 1) {
       const crew = catalog.crews[index + 1];
@@ -215,7 +221,7 @@ async function auditHeatFlow() {
         method: 'POST',
         body: {
           deviceId: (index + 100).toString(16).padStart(32, '0'),
-          difficulty: 'BEGINNER', crewId: crew.id, driverId: driver.id,
+          difficulty: 'BEGINNER', securityCircuitId: 'FULL_STACK', crewId: crew.id, driverId: driver.id,
         },
       });
     }
@@ -246,7 +252,7 @@ async function auditHeatFlow() {
     assert.match(await page.locator('#race-speed').textContent(), /^\d+$/);
     assert.equal(await page.locator('#race-lap').textContent(), '1/2');
     assert.match(await page.locator('#race-position').textContent(), /^P[1-4]$/);
-    assert.equal(await page.locator('#race-gate').textContent(), '1/10');
+    assert.equal(await page.locator('#race-gate').textContent(), `1/${totalEncounters}`);
     assert.equal(await page.locator('#race-overtake').count(), 1);
     await assertUniqueMarkerTransforms(page, '[data-testid="track-map"] .race-marker', 'participant first racing');
     await screen.waitForSelector('#screen-app[data-screen="racing"] [data-testid="screen-track"]');
@@ -307,7 +313,7 @@ async function auditHeatFlow() {
     await page.locator('#feedback-continue').click();
 
     const beforeTrend = await api(harness.origin, '/api/state', { token });
-    await harness.setNow(2_300);
+    await harness.setNow(400 + Math.ceil(totalEncounters * 0.56) * 300);
     await page.waitForFunction(() => document.querySelector('#race-lap')?.textContent === '2/2');
     assert.equal(await page.locator('#race-lap').textContent(), '2/2');
     const trendState = await api(harness.origin, '/api/state', { token });
@@ -345,11 +351,11 @@ async function auditHeatFlow() {
     await assertNoHorizontalOverflow(page, 'participant-trend-320');
     await assertNoHorizontalOverflow(screen, 'screen-racing-320');
 
-    await harness.setNow(3_400);
+    await harness.setNow(400 + totalEncounters * 300);
     await waitScreen(page, 'result');
     assert.equal(await page.locator('[data-testid="result-card"]').count(), 1);
     assert.equal(await page.locator('[data-testid="result-leaderboard"] .standing-row').count(), 4);
-    assert.equal(await page.locator('[data-testid="result-review"] .review-item').count(), 10);
+    assert.equal(await page.locator('[data-testid="result-review"] .review-item').count(), totalEncounters);
     await assertNoHorizontalOverflow(page, 'result-320');
     await screen.waitForSelector('#screen-app[data-screen="result"] [data-testid="screen-board"]');
     await assertNoHorizontalOverflow(screen, 'screen-result-320');
@@ -365,13 +371,127 @@ async function auditHeatFlow() {
   }
 }
 
+async function auditRetirementRendering() {
+  const harness = await createHarness();
+  const mobileContext = await browser.newContext({ viewport: { width: 320, height: 568 }, reducedMotion: 'reduce' });
+  const screenContext = await browser.newContext({ viewport: { width: 320, height: 568 }, reducedMotion: 'reduce' });
+  try {
+    const identity = harness.store.join(
+      null,
+      'f'.repeat(32),
+      'BEGINNER',
+      CREWS[0].id,
+      DRIVERS.find(({ crewId }) => crewId === CREWS[0].id).id,
+      'BLUE',
+    );
+    harness.store.startWithAi(identity.token);
+    const player = harness.store.players.get(identity.token);
+    const match = harness.store.matches.get(identity.matchId);
+    const deck = harness.store.deckFor(match, player.difficulty, player.securityCircuitId);
+    deck.forEach((question, index) => {
+      const choice = index < 7
+        ? question.options.find(({ id }) => id !== question.correctOptionId).id
+        : question.correctOptionId;
+      match.actions.set(`${player.id}:${question.id}`, {
+        playerId: player.id,
+        task: question.id,
+        choice,
+        correct: index >= 7,
+        at: 0,
+      });
+    });
+    harness.store.enterResult(match, 200);
+
+    const page = await mobileContext.newPage();
+    await page.goto(`${harness.origin}/play`);
+    await page.evaluate((token) => sessionStorage.setItem('nitro-grid-player-token', token), identity.token);
+    await page.reload();
+    await waitScreen(page, 'result');
+    assert.equal(await page.locator('[data-testid="result-card"] h1').textContent(), 'RETIRED');
+    assert.equal(await page.locator('[data-testid="result-card"] .result-score-grid strong').nth(1).textContent(), 'RET');
+    assert.equal(await page.locator('[data-testid="result-leaderboard"] .standing-row.me .standing-position').textContent(), 'RET');
+    assert.match(await page.locator('[data-testid="result-leaderboard"] .standing-row.me .standing-gap').textContent(), /RETIRED/);
+    assert.doesNotMatch(await page.locator('[data-testid="result-card"]').textContent(), /P(?:–|null|undefined)/);
+    await assertNoHorizontalOverflow(page, 'retired-result-320');
+
+    const screen = await screenContext.newPage();
+    await screen.goto(`${harness.origin}/screen`);
+    await screen.waitForSelector('.screen-order-row.retired');
+    assert.equal(await screen.locator('.screen-order-row.retired .screen-order-position').first().textContent(), 'RET');
+    assert.match(await screen.locator('.screen-order-row.retired .screen-order-gap').first().textContent(), /RETIRED/);
+    assert.doesNotMatch(await screen.locator('[data-testid="screen-board"]').textContent(), /P(?:–|null|undefined)/);
+    await assertNoHorizontalOverflow(screen, 'retired-screen-320');
+  } finally {
+    await mobileContext.close();
+    await screenContext.close();
+    await harness.close();
+  }
+}
+
+async function auditDriverCardGeometry() {
+  const harness = await createHarness();
+  try {
+    for (const width of [320, 360, 375]) {
+      const context = await browser.newContext({
+        viewport: { width, height: 800 }, reducedMotion: 'no-preference',
+      });
+      try {
+        const page = await context.newPage();
+        await page.goto(`${harness.origin}/play`);
+        await waitScreen(page, 'garage');
+        await page.locator('.crew-card').first().click();
+        await page.waitForFunction(() => document.querySelectorAll('.driver-card img').length === 2);
+        await page.locator('.driver-card img').evaluateAll(async (images) => {
+          await Promise.all(images.map((image) => image.decode?.().catch(() => {})));
+        });
+        const cards = await page.locator('.driver-card').evaluateAll((elements) => elements.map((card) => {
+          const image = card.querySelector('img');
+          const copy = card.querySelector('.selection-copy');
+          const imageRect = image.getBoundingClientRect();
+          const copyRect = copy.getBoundingClientRect();
+          return {
+            imageBottom: imageRect.bottom,
+            copyTop: copyRect.top,
+            cardOverflow: card.scrollWidth - card.clientWidth,
+            naturalWidth: image.naturalWidth,
+            naturalHeight: image.naturalHeight,
+          };
+        }));
+        assert.equal(cards.length, 2, `${width}px did not render both driver cards`);
+        for (const card of cards) {
+          assert.ok(card.naturalWidth > 0 && card.naturalHeight > 0,
+            `${width}px driver media did not decode: ${JSON.stringify(card)}`);
+          assert.ok(card.imageBottom <= card.copyTop + 1,
+            `${width}px driver image overlaps the name panel: ${JSON.stringify(card)}`);
+          assert.ok(card.cardOverflow <= 1,
+            `${width}px driver card overflows horizontally: ${JSON.stringify(card)}`);
+        }
+        const documentWidth = await page.evaluate(() => ({
+          clientWidth: document.documentElement.clientWidth,
+          scrollWidth: document.documentElement.scrollWidth,
+          bodyScrollWidth: document.body.scrollWidth,
+        }));
+        assert.ok(documentWidth.scrollWidth <= documentWidth.clientWidth + 1
+          && documentWidth.bodyScrollWidth <= documentWidth.clientWidth + 1,
+        `${width}px garage document overflows horizontally: ${JSON.stringify(documentWidth)}`);
+      } finally {
+        await context.close();
+      }
+    }
+  } finally {
+    await harness.close();
+  }
+}
+
 try {
   browser = await chromium.launch({ executablePath, headless: true });
   assert.equal(CIRCUITS.length, 3);
   assert.equal(CREWS.length, 4);
   assert.equal(DRIVERS.length, 8);
+  await auditDriverCardGeometry();
   await auditHeatFlow();
-  console.log('UI layout checks passed at 320x568 for garage, heat matching, grid, race, feedback, result, retry, and live screen.');
+  await auditRetirementRendering();
+  console.log('UI layout checks passed at 320x568 for garage, heat matching, grid, race, feedback, result, RETIRED, retry, and live screen.');
 } finally {
   await browser?.close();
 }

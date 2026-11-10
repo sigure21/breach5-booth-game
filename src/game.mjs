@@ -1,25 +1,32 @@
 import { createHmac, randomBytes, randomInt } from 'node:crypto';
 import {
   HEAT_SIZE,
+  MAX_ENCOUNTERS,
+  MIN_ENCOUNTERS,
   PRODUCTION_ROUND_MS,
-  TOTAL_ENCOUNTERS,
   TOTAL_LAPS,
   maximumHeatRuntime,
   scaledMatchTiming,
 } from './clock.mjs';
-import { QUESTION_BANK, QUESTION_BANK_VERSION } from './content/questions.mjs';
+import * as questionContent from './content/questions.mjs';
 import { TREND_CARDS } from './content/trends.mjs';
 import {
   CIRCUITS,
   CREWS,
   DIFFICULTIES,
   DRIVERS,
+  SECURITY_CIRCUITS,
   getCrew,
   getDriver,
+  publicRaceCatalog,
   validateDifficulty,
+  validateSecurityCircuit,
 } from './race/catalog.mjs';
-import { buildRaceDeck } from './race/seed.mjs';
+import { buildRaceDeck, encounterCountForMatch } from './race/seed.mjs';
 import { answerIsCorrect, finishBand, raceScore, scoreFromResults } from './race/scoring.mjs';
+
+const DEFAULT_QUESTION_SOURCE = questionContent.QUESTION_BANKS ?? questionContent.QUESTION_BANK;
+const DEFAULT_QUESTION_BANK_VERSION = questionContent.QUESTION_BANK_VERSION ?? '1';
 
 const MATCH_STATUSES = Object.freeze(['MATCHING', 'GRID', 'RACING', 'RESULT', 'COMPLETE']);
 const ADJECTIVES = Object.freeze(['NEON', 'SWIFT', 'QUIET', 'BRAVE', 'LUCID', 'NOVA', 'PIXEL', 'SOLAR']);
@@ -66,19 +73,34 @@ function explanationFor(question, choice = null) {
 }
 
 function publicQuestion(question, difficulty, action = null) {
+  const generated = question.topicFamily && question.conceptId && question.topicFamily !== question.conceptId;
+  const evidence = evidenceFor(question, difficulty).map((item) => (
+    generated && item && typeof item === 'object'
+      ? Object.fromEntries(Object.entries(item).filter(([key]) => key !== 'annotation'))
+      : item
+  ));
+  const options = (question.options ?? []).map((option) => ({
+    id: optionId(option),
+    label: optionLabel(option),
+    technical: typeof option === 'object'
+      ? safeText(option.technical ?? option.detail ?? option.description)
+      : '',
+  }));
+  const technicalValues = [...new Set(options.map(({ technical }) => technical).filter(Boolean))];
+  const decisionFrame = technicalValues.length === 1 ? technicalValues[0] : null;
   return {
     id: question.id,
     taskId: question.id,
     category: question.category ?? 'general',
     topic: question.topic ?? null,
+    securityCircuitId: question.securityCircuitId,
+    securityLane: question.securityLane,
     question: questionPrompt(question),
-    evidence: evidenceFor(question, difficulty),
-    options: (question.options ?? []).map((option) => ({
-      id: optionId(option),
-      label: optionLabel(option),
-      technical: typeof option === 'object'
-        ? safeText(option.technical ?? option.detail ?? option.description)
-        : '',
+    evidence,
+    decisionFrame,
+    options: options.map((option) => ({
+      ...option,
+      technical: decisionFrame ? '' : option.technical,
     })),
     racePhase: question.racePhase,
     gridPosition: question.gridPosition,
@@ -119,6 +141,14 @@ function assertTiming(timing) {
   if (timing.minimumExposureMs > timing.encounterMs) {
     throw new Error('minimumExposureMs must not exceed encounterMs');
   }
+  if (!Number.isInteger(timing.minEncounters) || !Number.isInteger(timing.maxEncounters)
+    || timing.minEncounters < MIN_ENCOUNTERS || timing.maxEncounters > MAX_ENCOUNTERS
+    || timing.minEncounters > timing.maxEncounters) {
+    throw new Error(`encounter range must be between ${MIN_ENCOUNTERS} and ${MAX_ENCOUNTERS}`);
+  }
+  if (maximumHeatRuntime(timing) > PRODUCTION_ROUND_MS) {
+    throw new Error(`maximum heat runtime must not exceed ${PRODUCTION_ROUND_MS}ms`);
+  }
 }
 
 function raceEffect(question, correct, score) {
@@ -131,6 +161,24 @@ function raceEffect(question, correct, score) {
     : `BATTERY ${score.batteryPercent}% · RECHARGE`;
 }
 
+function publicLiveScore(score) {
+  return {
+    answered: score.answered,
+    possible: score.possible,
+    correct: score.correct,
+    accuracy: score.accuracy,
+    streak: score.streak,
+    launchBoost: score.launchBoost,
+    batteryPercent: score.batteryPercent,
+    boostMode: score.boostMode,
+    overtakeMode: false,
+    activeAero: score.activeAero,
+    pitTimeMs: score.pitTimeMs,
+    cleanCorners: score.cleanCorners,
+    finalAttack: score.finalAttack,
+  };
+}
+
 export class GameStore {
   constructor({
     now = () => Date.now(),
@@ -141,11 +189,13 @@ export class GameStore {
     encounterMs,
     minimumExposureMs,
     resultMs,
+    minEncounters,
+    maxEncounters,
     maxPlayers = 48,
     sessionTtlMs = 15 * 60_000,
     seedSecret = randomBytes(32).toString('hex'),
-    questionBank = QUESTION_BANK,
-    questionBankVersion = QUESTION_BANK_VERSION ?? '1',
+    questionBank = DEFAULT_QUESTION_SOURCE,
+    questionBankVersion = DEFAULT_QUESTION_BANK_VERSION,
   } = {}) {
     const scaled = scaledMatchTiming(roundMs);
     const timing = Object.freeze({
@@ -157,15 +207,16 @@ export class GameStore {
       minimumExposureMs: minimumExposureMs ?? scaled.minimumExposureMs,
       resultMs: resultMs ?? scaled.resultMs,
       seats: HEAT_SIZE,
-      totalEncounters: TOTAL_ENCOUNTERS,
+      minEncounters: minEncounters ?? scaled.minEncounters,
+      maxEncounters: maxEncounters ?? scaled.maxEncounters,
       totalLaps: TOTAL_LAPS,
     });
     assertTiming(timing);
     if (!Number.isInteger(maxPlayers) || maxPlayers < HEAT_SIZE || maxPlayers > 48) {
       throw new Error('maxPlayers must be an integer between 4 and 48');
     }
-    if (!Array.isArray(questionBank) || questionBank.length < TOTAL_ENCOUNTERS) {
-      throw new Error('question bank must contain at least ten questions');
+    if (!Array.isArray(questionBank) && (!questionBank || typeof questionBank !== 'object')) {
+      throw new Error('question bank must be an array or difficulty-keyed object');
     }
     if (!Array.isArray(TREND_CARDS) || TREND_CARDS.length < 2) throw new Error('trend card bank is incomplete');
     Object.assign(this, {
@@ -185,6 +236,8 @@ export class GameStore {
     this.stats = {
       heats: 0,
       humanFinishes: 0,
+      humanRetirements: 0,
+      aiRetirements: 0,
       aiFilledSeats: 0,
       perfectLaps: 0,
       totalCorrect: 0,
@@ -217,7 +270,9 @@ export class GameStore {
     return `RACER-${randomBytes(3).toString('hex').toUpperCase()}`;
   }
 
-  createMatch() {
+  createMatch(difficulty = 'BEGINNER', securityCircuitId = 'FULL_STACK') {
+    validateDifficulty(difficulty);
+    validateSecurityCircuit(securityCircuitId);
     const index = this.nextMatchIndex;
     this.nextMatchIndex += 1;
     const circuit = CIRCUITS[(index - 1) % CIRCUITS.length];
@@ -228,10 +283,30 @@ export class GameStore {
       .sort((left, right) => left.rank.localeCompare(right.rank))
       .slice(0, 2)
       .map(({ card }) => card);
+    const totalEncounters = encounterCountForMatch({
+      matchId,
+      circuitId: circuit.id,
+      minEncounters: this.timing.minEncounters,
+      maxEncounters: this.timing.maxEncounters,
+      version: this.questionBankVersion,
+      secret: this.seedSecret,
+    });
+    const deck = Object.freeze(buildRaceDeck(this.questionBank, {
+      matchId,
+      circuitId: circuit.id,
+      difficulty,
+      securityCircuitId,
+      encounterCount: totalEncounters,
+      version: this.questionBankVersion,
+      secret: this.seedSecret,
+    }));
+    const decks = Object.freeze({ [`${securityCircuitId}:${difficulty}`]: deck });
     const match = {
       id: matchId,
       index,
       circuit,
+      difficulty,
+      securityCircuitId,
       createdAt,
       minStartAt: createdAt + this.timing.minWaitMs,
       maxStartAt: createdAt + this.timing.maxWaitMs,
@@ -241,12 +316,10 @@ export class GameStore {
       phaseEndsAt: createdAt + this.timing.maxWaitMs,
       humanTokens: [],
       racers: [],
-      deck: buildRaceDeck(this.questionBank, {
-        matchId,
-        circuitId: circuit.id,
-        version: this.questionBankVersion,
-        secret: this.seedSecret,
-      }),
+      totalEncounters,
+      decks,
+      // Internal compatibility alias; player-facing logic always selects the difficulty deck.
+      deck,
       trendCards,
       actions: new Map(),
       actionIds: new Map(),
@@ -271,15 +344,49 @@ export class GameStore {
     return match.humanTokens.map((playerToken) => this.players.get(playerToken)).filter(Boolean);
   }
 
+  deckFor(match, difficulty, securityCircuitId = 'FULL_STACK') {
+    return match.decks[`${securityCircuitId}:${difficulty}`]
+      ?? match.deck;
+  }
+
+  scoreContextForRacer(racer) {
+    if (racer.isAi) {
+      return {
+        difficulty: racer.difficulty,
+        crewPerformance: getCrew(racer.crewId).performanceRating,
+        driverSkill: getDriver(racer.driverId).skillRating,
+        aiOrdinal: racer.aiOrdinal,
+      };
+    }
+    return {
+      difficulty: racer.difficulty,
+      crewPerformance: getCrew(racer.crewId).performanceRating,
+      driverSkill: getDriver(racer.driverId).skillRating,
+    };
+  }
+
+  scoreForPlayer(match, player) {
+    const deck = this.deckFor(match, player.difficulty, player.securityCircuitId);
+    return raceScore(
+      deck,
+      match.actions,
+      player.id,
+      this.scoreContextForRacer(this.humanRacer(player, 0)),
+    );
+  }
+
   activeHumanCount() {
     return [...this.matches.values()]
       .filter(({ status }) => status !== 'COMPLETE')
       .reduce((total, match) => total + match.humanTokens.length, 0);
   }
 
-  openMatch() {
+  openMatch(difficulty, securityCircuitId) {
     return [...this.matches.values()]
-      .filter((match) => match.status === 'MATCHING' && match.humanTokens.length < HEAT_SIZE)
+      .filter((match) => match.status === 'MATCHING'
+        && match.humanTokens.length < HEAT_SIZE
+        && match.difficulty === difficulty
+        && match.securityCircuitId === securityCircuitId)
       .sort((left, right) => left.index - right.index)[0] ?? null;
   }
 
@@ -298,12 +405,20 @@ export class GameStore {
       callsign: player.callsign,
       circuitId: match.circuit.id,
       difficulty: player.difficulty,
+      securityCircuitId: player.securityCircuitId,
       crewId: player.crewId,
       driverId: player.driverId,
     };
   }
 
-  join(existingToken = null, requestedDeviceId = null, difficulty = null, crewId = null, driverId = null) {
+  join(
+    existingToken = null,
+    requestedDeviceId = null,
+    difficulty = null,
+    crewId = null,
+    driverId = null,
+    securityCircuitId = null,
+  ) {
     this.advanceAll();
     this.cleanup();
     const at = this.now();
@@ -321,12 +436,14 @@ export class GameStore {
     }
 
     const selectedDifficulty = validateDifficulty(difficulty);
+    const selectedSecurityCircuit = validateSecurityCircuit(securityCircuitId);
     const crew = getCrew(crewId);
     const driver = getDriver(driverId);
     if (driver.crewId !== crew.id) this.fail('invalid_driver');
     if (this.activeHumanCount() >= this.maxPlayers) this.fail('capacity');
 
-    const match = this.openMatch() ?? this.createMatch();
+    const match = this.openMatch(selectedDifficulty, selectedSecurityCircuit)
+      ?? this.createMatch(selectedDifficulty, selectedSecurityCircuit);
     const playerToken = token();
     const retentionMs = Math.max(this.sessionTtlMs, this.roundMs * 3);
     const hardExpiresAt = match.createdAt + maximumHeatRuntime(this.timing) + retentionMs;
@@ -336,6 +453,7 @@ export class GameStore {
       callsign: this.makeCallsign(),
       matchId: match.id,
       difficulty: selectedDifficulty,
+      securityCircuitId: selectedSecurityCircuit,
       crewId: crew.id,
       driverId: driver.id,
       deviceId,
@@ -354,6 +472,23 @@ export class GameStore {
     return this.identity(player);
   }
 
+  startWithAi(playerToken) {
+    this.advanceAll();
+    this.cleanup();
+    const player = this.requirePlayer(playerToken);
+    const match = this.matchForPlayer(player);
+    if (match.status !== 'MATCHING'
+      || match.humanTokens.length < 1
+      || match.humanTokens.length >= HEAT_SIZE) {
+      this.fail('solo_start_unavailable');
+    }
+    this.enterGrid(match, this.now());
+    return {
+      ok: true,
+      match: this.publicMatchState(match),
+    };
+  }
+
   requirePlayer(playerToken) {
     const player = this.players.get(playerToken);
     if (!player || player.expiresAt <= this.now() || player.hardExpiresAt <= this.now()) this.fail('unauthorized');
@@ -368,6 +503,7 @@ export class GameStore {
       callsign: player.callsign,
       isAi: false,
       difficulty: player.difficulty,
+      securityCircuitId: player.securityCircuitId,
       crewId: player.crewId,
       driverId: player.driverId,
       seat,
@@ -386,18 +522,22 @@ export class GameStore {
       .sort((left, right) => left.rank.localeCompare(right.rank));
     const driver = rankedDrivers[0]?.driver ?? DRIVERS[seat % DRIVERS.length];
     usedDriverIds.add(driver.id);
+    const aiOrdinal = seat - match.humanTokens.length;
     const skill = 0.58 + deterministicUnit(this.seedSecret, 'ai-skill', `${match.id}:${seat}`) * 0.24;
+    const aiDeck = this.deckFor(match, match.difficulty, match.securityCircuitId);
     return {
       id: `ai_${String(match.index).padStart(4, '0')}_${seat + 1}`,
       playerId: null,
-      callsign: `${AI_NAMES[(seat - match.humanTokens.length) % AI_NAMES.length]}-${String(match.index).padStart(2, '0')}`,
+      callsign: `${AI_NAMES[aiOrdinal % AI_NAMES.length]}-${String(match.index).padStart(2, '0')}`,
       isAi: true,
-      difficulty: 'AI',
+      difficulty: match.difficulty,
+      securityCircuitId: match.securityCircuitId,
       crewId: driver.crewId,
       driverId: driver.id,
       seat,
       aiSkill: Math.round(skill * 100) / 100,
-      aiResults: match.deck.map((question, questionIndex) => (
+      aiOrdinal,
+      aiResults: aiDeck.map((question, questionIndex) => (
         deterministicUnit(this.seedSecret, 'ai-answer', `${match.id}:${seat}:${question.id}:${questionIndex}`) < skill
       )),
     };
@@ -428,7 +568,7 @@ export class GameStore {
   enterResult(match, startedAt) {
     match.status = 'RESULT';
     match.statusStartedAt = startedAt;
-    match.encounterIndex = TOTAL_ENCOUNTERS;
+    match.encounterIndex = match.totalEncounters;
     match.encounterStartedAt = null;
     match.encounterEndsAt = null;
     match.resultEndsAt = startedAt + this.timing.resultMs;
@@ -443,16 +583,19 @@ export class GameStore {
     match.completedAt = completedAt;
   }
 
-  currentQuestion(match) {
-    return match.status === 'RACING' ? match.deck[match.encounterIndex] ?? null : null;
+  currentQuestion(match, difficulty = 'BEGINNER', securityCircuitId = 'FULL_STACK') {
+    return match.status === 'RACING'
+      ? this.deckFor(match, difficulty, securityCircuitId)[match.encounterIndex] ?? null
+      : null;
   }
 
   allHumansAnswered(match) {
-    const question = this.currentQuestion(match);
-    if (!question) return false;
     return match.racers
       .filter(({ isAi }) => !isAi)
-      .every((racer) => match.actions.has(`${racer.playerId}:${question.id}`));
+      .every((racer) => {
+        const question = this.currentQuestion(match, racer.difficulty, racer.securityCircuitId);
+        return question && match.actions.has(`${racer.playerId}:${question.id}`);
+      });
   }
 
   advanceMatch(match) {
@@ -479,7 +622,7 @@ export class GameStore {
       const completedEarly = exposed && this.allHumansAnswered(match);
       if (!deadline && !completedEarly) return false;
       const nextStartedAt = deadline ? match.encounterEndsAt : at;
-      if (match.encounterIndex >= TOTAL_ENCOUNTERS - 1) {
+      if (match.encounterIndex >= match.totalEncounters - 1) {
         this.enterResult(match, nextStartedAt);
       } else {
         match.encounterIndex += 1;
@@ -510,19 +653,36 @@ export class GameStore {
     this.cleanup();
   }
 
-  scoreForRacer(match, racer, completedCount = TOTAL_ENCOUNTERS) {
-    const revealed = clamp(completedCount, 0, TOTAL_ENCOUNTERS);
+  scoreForRacer(match, racer, completedCount = match.totalEncounters) {
+    const deck = this.deckFor(
+      match,
+      racer.difficulty,
+      racer.securityCircuitId,
+    );
+    const revealed = clamp(completedCount, 0, deck.length);
     if (racer.isAi) {
-      const results = match.deck.map((_, index) => index < revealed && racer.aiResults[index] === true);
-      return scoreFromResults(match.deck, results, revealed, revealed);
+      const results = deck.map((_, index) => index < revealed && racer.aiResults[index] === true);
+      return scoreFromResults(
+        deck,
+        results,
+        revealed,
+        revealed,
+        this.scoreContextForRacer(racer),
+      );
     }
-    const results = match.deck.map((question, index) => {
+    const results = deck.map((question, index) => {
       if (index >= revealed) return false;
       return match.actions.get(`${racer.playerId}:${question.id}`)?.correct === true;
     });
-    const answered = match.deck.slice(0, revealed)
+    const answered = deck.slice(0, revealed)
       .filter((question) => match.actions.has(`${racer.playerId}:${question.id}`)).length;
-    return scoreFromResults(match.deck, results, answered, revealed);
+    return scoreFromResults(
+      deck,
+      results,
+      answered,
+      revealed,
+      this.scoreContextForRacer(racer),
+    );
   }
 
   provisionalRacers(match) {
@@ -535,38 +695,62 @@ export class GameStore {
     const at = this.now();
     const completedCount = match.status === 'RACING'
       ? match.encounterIndex
-      : ['RESULT', 'COMPLETE'].includes(match.status) ? TOTAL_ENCOUNTERS : 0;
+      : ['RESULT', 'COMPLETE'].includes(match.status) ? match.totalEncounters : 0;
     const fraction = match.status === 'RACING'
       ? clamp((at - match.encounterStartedAt) / this.timing.encounterMs, 0, 1)
       : 0;
     const baseProgress = match.status === 'RACING'
-      ? ((match.encounterIndex + fraction) / TOTAL_ENCOUNTERS) * 0.94
+      ? ((match.encounterIndex + fraction) / match.totalEncounters) * 0.94
       : ['RESULT', 'COMPLETE'].includes(match.status) ? 1 : 0;
+    const finished = ['RESULT', 'COMPLETE'].includes(match.status);
     const modeled = this.provisionalRacers(match).map((racer) => {
       const score = this.scoreForRacer(match, racer, completedCount);
-      const performance = score.correct * 0.005 + score.streak * 0.0015
+      const ratingPace = completedCount === 0
+        ? 0
+        : racer.isAi
+          ? 0.0008
+          : ((getCrew(racer.crewId).performanceRating - 84)
+            + (getDriver(racer.driverId).skillRating - 84)) * 0.0001;
+      // Live telemetry uses only public, unweighted outcomes. Server-only tier weights
+      // are reserved for RESULT ranking so progress/gaps cannot become a weight oracle.
+      const observedAccuracy = completedCount === 0 ? 0 : score.correct / completedCount;
+      const performance = observedAccuracy * 0.042
+        + score.streak * 0.0004
         + (score.launchBoost ? 0.003 : 0)
-        + (completedCount > 5 && score.pitTimeMs <= 2_100 ? 0.003 : 0);
-      const progress = ['RESULT', 'COMPLETE'].includes(match.status)
-        ? 1
-        : clamp(baseProgress + performance, 0, 0.995);
-      const rankValue = ['RESULT', 'COMPLETE'].includes(match.status)
-        ? 1 + score.correct * 0.004 + score.streak * 0.0002 + (4_500 - score.pitTimeMs) / 1_000_000
-        : progress;
-      return { racer, score, progress, rankValue };
-    }).sort((left, right) => (
-      right.rankValue - left.rankValue
-      || right.score.correct - left.score.correct
-      || left.score.pitTimeMs - right.score.pitTimeMs
-      || left.racer.seat - right.racer.seat
-    ));
+        + (completedCount > 5 && score.pitTimeMs <= 2_100 ? 0.003 : 0)
+        + ratingPace;
+      const progress = finished ? 1 : clamp(baseProgress + performance, 0, 0.995);
+      const retired = finished && score.retired;
+      const hardP4 = finished && score.hardP4;
+      const rankValue = retired ? -2 : hardP4 ? -1 : finished ? score.rankingScore / 100 : progress;
+      return {
+        racer, score, progress, rankValue, retired, hardP4,
+      };
+    }).sort((left, right) => {
+      const rankDifference = right.rankValue - left.rankValue;
+      if (Math.abs(rankDifference) > Number.EPSILON) return rankDifference;
+      // AI-human equality is never a shared rank even if a future score model converges numerically.
+      if (left.racer.isAi !== right.racer.isAi) return left.racer.isAi ? 1 : -1;
+      return left.racer.seat - right.racer.seat;
+    });
 
     const leader = modeled[0] ?? null;
+    let previousEntry = null;
+    let previousPosition = null;
     return modeled.map((entry, index) => {
-      const { racer, score, progress, rankValue } = entry;
-      const position = index + 1;
-      const gapProgress = leader ? Math.max(0, leader.rankValue - rankValue) : 0;
-      const finished = ['RESULT', 'COMPLETE'].includes(match.status);
+      const {
+        racer, score, progress, rankValue, retired, hardP4,
+      } = entry;
+      const humanTie = previousEntry
+        && finished
+        && !retired
+        && !previousEntry.retired
+        && !racer.isAi
+        && !previousEntry.racer.isAi
+        && score.raceScore === previousEntry.score.raceScore
+        && hardP4 === previousEntry.hardP4;
+      const position = retired ? null : hardP4 ? 4 : humanTie ? previousPosition : index + 1;
+      const gapProgress = leader ? clamp(leader.rankValue - rankValue, 0, 1) : 0;
       const lap = finished ? TOTAL_LAPS : progress >= 0.5 ? 2 : 1;
       const trackProgress = finished ? 1 : (progress * TOTAL_LAPS) % 1;
       const zoneIndex = Math.min(
@@ -581,7 +765,7 @@ export class GameStore {
       );
       const boostMode = match.status === 'RACING' && score.boostMode && batteryPercent >= 25;
       const oneSecondProgressGap = clamp(
-        1_000 / (this.timing.encounterMs * TOTAL_ENCOUNTERS),
+        1_000 / (this.timing.encounterMs * match.totalEncounters),
         0.004,
         0.02,
       );
@@ -600,18 +784,30 @@ export class GameStore {
       const activeAero = match.status === 'RACING'
         && speedKph >= match.circuit.speedRangeKph.min
           + (match.circuit.speedRangeKph.max - match.circuit.speedRangeKph.min) * 0.62;
-      const gapMeters = index === 0 ? 0 : Math.round(
-        gapProgress * match.circuit.officialLengthKm * 1_000 * TOTAL_LAPS,
-      );
-      return {
+      // RESULT gaps are presentation-only classification markers. Using the final
+      // ranking-score delta here would turn the public distance into a score oracle.
+      const gapMeters = finished
+        ? (Number.isInteger(position) ? Math.max(0, position - 1) * 125 : 0)
+        : index === 0 ? 0 : Math.round(
+          gapProgress * match.circuit.officialLengthKm * 1_000 * TOTAL_LAPS,
+        );
+      const crew = getCrew(racer.crewId);
+      const driver = getDriver(racer.driverId);
+      const publicRacer = {
         id: racer.id,
         callsign: racer.callsign,
         isAi: racer.isAi,
+        difficulty: racer.difficulty,
+        securityCircuitId: racer.securityCircuitId,
         crewId: racer.crewId,
-        crewName: getCrew(racer.crewId).name,
+        crewName: crew.name,
+        performanceRating: crew.performanceRating,
         driverId: racer.driverId,
-        driverName: getDriver(racer.driverId).name,
+        driverName: driver.name,
+        skillRating: driver.skillRating,
         position,
+        retired,
+        classificationStatus: retired ? 'RETIRED' : finished ? 'CLASSIFIED' : 'RUNNING',
         lap,
         totalLaps: TOTAL_LAPS,
         progress: Math.round(progress * 10_000) / 10_000,
@@ -636,6 +832,9 @@ export class GameStore {
           streak: score.streak,
         },
       };
+      previousEntry = entry;
+      previousPosition = position;
+      return publicRacer;
     });
   }
 
@@ -656,6 +855,8 @@ export class GameStore {
       id: match.id,
       matchId: match.id,
       status: match.status,
+      difficulty: match.difficulty,
+      securityCircuitId: match.securityCircuitId,
       humanCount,
       aiCount,
       seats: HEAT_SIZE,
@@ -664,9 +865,9 @@ export class GameStore {
       startsInMs,
       encounterIndex: match.status === 'RACING'
         ? match.encounterIndex
-        : ['MATCHING', 'GRID'].includes(match.status) ? -1 : TOTAL_ENCOUNTERS,
+        : ['MATCHING', 'GRID'].includes(match.status) ? -1 : match.totalEncounters,
       encounterNumber: match.status === 'RACING' ? match.encounterIndex + 1 : 0,
-      totalEncounters: TOTAL_ENCOUNTERS,
+      totalEncounters: match.totalEncounters,
       encounterRemainingMs: match.status === 'RACING' ? Math.max(0, match.encounterEndsAt - at) : 0,
       minimumExposureMs: this.timing.minimumExposureMs,
       circuit: match.circuit,
@@ -681,7 +882,7 @@ export class GameStore {
         : state.status === 'RACING' ? state.encounterRemainingMs
           : state.status === 'RESULT' ? Math.max(0, match.resultEndsAt - this.now()) : 0;
     const raceProgress = state.status === 'RACING'
-      ? (match.encounterIndex + clamp((this.now() - match.encounterStartedAt) / this.timing.encounterMs, 0, 1)) / TOTAL_ENCOUNTERS
+      ? (match.encounterIndex + clamp((this.now() - match.encounterStartedAt) / this.timing.encounterMs, 0, 1)) / match.totalEncounters
       : ['RESULT', 'COMPLETE'].includes(state.status) ? 1 : 0;
     return {
       roundId: match.id,
@@ -696,7 +897,7 @@ export class GameStore {
   }
 
   observationsFor(match, player) {
-    return match.deck.flatMap((question) => {
+    return this.deckFor(match, player.difficulty, player.securityCircuitId).flatMap((question) => {
       const action = match.actions.get(`${player.id}:${question.id}`);
       if (!action) return [];
       const selected = (question.options ?? []).find((option) => optionId(option) === action.choice);
@@ -716,14 +917,17 @@ export class GameStore {
     this.cleanup();
     const player = this.requirePlayer(playerToken);
     const match = this.matchForPlayer(player);
-    const currentQuestion = this.currentQuestion(match);
+    const currentQuestion = this.currentQuestion(match, player.difficulty, player.securityCircuitId);
     const currentAction = currentQuestion
       ? match.actions.get(`${player.id}:${currentQuestion.id}`) ?? null
       : null;
     const tasks = currentQuestion ? [publicQuestion(currentQuestion, player.difficulty, currentAction)] : [];
-    const racers = this.raceSnapshot(match);
+    const racers = this.raceSnapshot(match).map((racer) => ({
+      ...racer,
+      isPlayer: racer.id === player.id,
+    }));
     const playerRace = racers.find(({ id }) => id === player.id) ?? null;
-    const score = raceScore(match.deck, match.actions, player.id);
+    const score = this.scoreForPlayer(match, player);
     const matchState = this.publicMatchState(match);
     return {
       circuit: match.circuit,
@@ -732,6 +936,7 @@ export class GameStore {
         racerId: player.id,
         callsign: player.callsign,
         difficulty: player.difficulty,
+        securityCircuitId: player.securityCircuitId,
         crewId: player.crewId,
         driverId: player.driverId,
         crew: getCrew(player.crewId),
@@ -747,7 +952,10 @@ export class GameStore {
           id: player.id,
           callsign: player.callsign,
           isAi: false,
+          securityCircuitId: player.securityCircuitId,
           position: 1,
+          retired: false,
+          classificationStatus: 'RUNNING',
           lap: 1,
           totalLaps: TOTAL_LAPS,
           progress: 0,
@@ -793,7 +1001,7 @@ export class GameStore {
       return { ...replay.response, duplicate: true };
     }
 
-    const question = this.currentQuestion(match);
+    const question = this.currentQuestion(match, player.difficulty, player.securityCircuitId);
     if (!question || question.id !== task) this.fail('phase_closed');
     if (!(question.options ?? []).some((option) => optionId(option) === choice)) this.fail('invalid_choice');
     const actionKey = `${player.id}:${task}`;
@@ -801,7 +1009,7 @@ export class GameStore {
     const correct = answerIsCorrect(question, choice);
     const action = { playerId: player.id, task, choice, correct, at: this.now() };
     match.actions.set(actionKey, action);
-    const score = raceScore(match.deck, match.actions, player.id);
+    const score = this.scoreForPlayer(match, player);
     const response = {
       ok: true,
       selected: choice,
@@ -811,19 +1019,25 @@ export class GameStore {
         correctOptionId: expectedChoice(question),
         effect: raceEffect(question, correct, score),
       },
-      race: score,
+      race: publicLiveScore(score),
     };
     match.actionIds.set(idempotencyKey, { task, choice, response });
     return response;
   }
 
   publicResult(match, player, racers = this.raceSnapshot(match)) {
-    const score = raceScore(match.deck, match.actions, player.id);
+    const deck = this.deckFor(match, player.difficulty, player.securityCircuitId);
+    const score = this.scoreForPlayer(match, player);
     const playerRace = racers.find(({ id }) => id === player.id);
+    const position = playerRace ? playerRace.position : score.retired ? null : HEAT_SIZE;
+    const outcome = finishBand(score, position);
     return {
-      outcome: finishBand(score),
-      finishBand: finishBand(score),
-      position: playerRace?.position ?? HEAT_SIZE,
+      outcome,
+      finishBand: outcome,
+      position,
+      securityCircuitId: player.securityCircuitId,
+      retired: outcome === 'RETIRED',
+      classificationStatus: outcome === 'RETIRED' ? 'RETIRED' : 'CLASSIFIED',
       circuit: match.circuit,
       classification: racers,
       answered: score.answered,
@@ -836,7 +1050,7 @@ export class GameStore {
       overtakeMode: playerRace?.overtakeMode ?? false,
       activeAero: playerRace?.activeAero ?? false,
       pitTimeMs: score.pitTimeMs,
-      review: match.deck.map((question) => {
+      review: deck.map((question) => {
         const action = match.actions.get(`${player.id}:${question.id}`) ?? null;
         const selected = (question.options ?? []).find((option) => optionId(option) === action?.choice);
         const correct = (question.options ?? []).find((option) => optionId(option) === expectedChoice(question));
@@ -844,6 +1058,8 @@ export class GameStore {
           id: question.id,
           taskId: question.id,
           category: question.category ?? 'general',
+          securityCircuitId: question.securityCircuitId,
+          securityLane: question.securityLane,
           question: questionPrompt(question),
           selected: action?.choice ?? null,
           selectedLabel: selected ? optionLabel(selected) : null,
@@ -859,9 +1075,16 @@ export class GameStore {
   finalize(match) {
     if (match.finalized) return;
     this.stats.heats += 1;
-    for (const racer of match.racers.filter(({ isAi }) => !isAi)) {
-      const score = raceScore(match.deck, match.actions, racer.playerId);
+    for (const racer of match.racers) {
+      const score = this.scoreForRacer(match, racer);
+      if (racer.isAi) {
+        if (score.retired) this.stats.aiRetirements += 1;
+        continue;
+      }
+      const player = this.playersIn(match).find(({ id }) => id === racer.playerId);
+      if (!player) continue;
       this.stats.humanFinishes += 1;
+      if (score.retired) this.stats.humanRetirements += 1;
       this.stats.totalCorrect += score.correct;
       this.stats.totalAnswers += score.answered;
       if (score.correct === score.possible) this.stats.perfectLaps += 1;
@@ -875,12 +1098,19 @@ export class GameStore {
     return counts;
   }
 
+  securityCircuitCounts(match) {
+    const counts = Object.fromEntries(SECURITY_CIRCUITS.map(({ id }) => [id, 0]));
+    for (const player of this.playersIn(match)) counts[player.securityCircuitId] += 1;
+    return counts;
+  }
+
   heatSummary(match) {
     const state = this.publicMatchState(match);
     const standings = this.raceSnapshot(match);
     return {
       ...state,
       difficultyCounts: this.difficultyCounts(match),
+      securityCircuitCounts: this.securityCircuitCounts(match),
       standings,
       racers: standings,
       trend: this.trendFor(match),
@@ -912,12 +1142,7 @@ export class GameStore {
         activeHeats: active.length,
         polePositions: this.stats.perfectLaps,
       },
-      catalogs: {
-        circuits: CIRCUITS,
-        crews: CREWS,
-        drivers: DRIVERS,
-        difficulties: DIFFICULTIES,
-      },
+      catalogs: publicRaceCatalog(this.timing),
     };
   }
 

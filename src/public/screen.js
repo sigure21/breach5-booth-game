@@ -1,6 +1,7 @@
 const app = document.querySelector('#screen-app');
 const statusNode = document.querySelector('#screen-status');
 const clockNode = document.querySelector('#screen-clock');
+const formatNode = document.querySelector('#screen-format');
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 const DEFAULT_PATH = 'M 178 508 C 80 430 92 236 222 150 C 334 76 452 112 520 186 C 600 274 704 104 838 136 C 950 164 944 338 858 426 C 770 516 650 540 536 480 C 418 418 300 606 178 508 Z';
@@ -28,6 +29,46 @@ function svgElement(tag, className = '') {
 
 function clamp(value, minimum = 0, maximum = 1) {
   return Math.min(maximum, Math.max(minimum, Number(value) || 0));
+}
+
+function positiveInteger(value, fallback) {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function catalogEncounterRange() {
+  const match = catalogs.match ?? {};
+  const range = match.encounterRange ?? {};
+  const total = positiveInteger(match.totalEncounters, 10);
+  const minimum = positiveInteger(
+    match.minEncounters ?? match.minTotalEncounters ?? match.totalEncountersMin ?? range.min,
+    total,
+  );
+  const maximum = positiveInteger(
+    match.maxEncounters ?? match.maxTotalEncounters ?? match.totalEncountersMax ?? range.max,
+    total,
+  );
+  return { minimum: Math.min(minimum, maximum), maximum: Math.max(minimum, maximum) };
+}
+
+function catalogEncounterLabel() {
+  const { minimum, maximum } = catalogEncounterRange();
+  return minimum === maximum ? String(minimum) : `${minimum}–${maximum}`;
+}
+
+function totalEncounters(item) {
+  const match = matchOf(item);
+  const fallback = catalogEncounterRange().maximum;
+  return positiveInteger(match.totalEncounters ?? raceOf(item).possible, fallback);
+}
+
+function encounterNumber(item) {
+  const match = matchOf(item);
+  const total = totalEncounters(item);
+  const number = Number(match.encounterNumber) > 0
+    ? Number(match.encounterNumber)
+    : Number(match.encounterIndex ?? 0) + 1;
+  return clamp(number, 1, total);
 }
 
 function formatTime(milliseconds) {
@@ -59,9 +100,39 @@ function circuitOf(item) {
   return (catalogs.circuits ?? catalogs.tracks ?? []).find((circuit) => circuit.id === id) ?? {};
 }
 
+function securityCircuitOf(item) {
+  const match = matchOf(item);
+  const id = match.securityCircuitId ?? item?.securityCircuitId;
+  return (catalogs.securityCircuits ?? []).find((entry) => entry.id === id) ?? { id, label: id ?? 'SECURITY' };
+}
+
+function difficultyLabel(item) {
+  const id = matchOf(item).difficulty ?? item?.difficulty;
+  return (catalogs.difficultyDetails ?? []).find((entry) => entry.id === id)?.label ?? id ?? '난이도 대기';
+}
+
+function isRetired(racer) {
+  return racer?.retired === true || racer?.classificationStatus === 'RETIRED' || racer?.outcome === 'RETIRED';
+}
+
+function positionLabel(racer) {
+  return isRetired(racer) ? 'RET' : `P${racer?.position ?? '–'}`;
+}
+
+function gapLabel(racer) {
+  if (isRetired(racer)) return 'RETIRED';
+  return racer?.position === 1 ? 'LEADER' : `+${Math.max(0, Math.round(racer?.gapMeters ?? 0))}m`;
+}
+
 function racersOf(item) {
   const racers = raceOf(item).racers ?? matchOf(item).racers ?? item?.racers ?? [];
-  return [...racers].sort((left, right) => (left.position ?? 99) - (right.position ?? 99));
+  return [...racers].sort((left, right) => (
+    Number(isRetired(left)) - Number(isRetired(right))
+    || (left.position ?? 99) - (right.position ?? 99)
+    || Number(left.isAi === true) - Number(right.isAi === true)
+    || (left.seat ?? 99) - (right.seat ?? 99)
+    || String(left.id ?? left.callsign ?? '').localeCompare(String(right.id ?? right.callsign ?? ''))
+  ));
 }
 
 function racerId(racer) {
@@ -150,7 +221,7 @@ function trackMap(item) {
     label.setAttribute('x', '-56');
     label.setAttribute('y', '5');
     label.setAttribute('text-anchor', 'middle');
-    label.textContent = String(racer.position ?? '–');
+    label.textContent = isRetired(racer) ? 'R' : String(racer.position ?? '–');
     marker.append(car, badge, label);
     svg.append(marker);
   }
@@ -161,18 +232,18 @@ function trackMap(item) {
 function leaderboard(item) {
   const board = element('section', 'screen-leaderboard');
   board.dataset.testid = 'screen-leaderboard';
-  board.append(element('h2', '', 'LIVE ORDER · P1—P4'));
+  board.append(element('h2', '', 'CLASSIFICATION · P1—P4 / RET'));
   const racers = racersOf(item).slice(0, 4);
   if (!racers.length) board.append(element('p', 'screen-empty', '그리드 확정 대기 중'));
   for (const racer of racers) {
-    const row = element('article', `screen-order-row${racer.isAi ? ' ai' : ''}`);
+    const row = element('article', `screen-order-row${racer.isAi ? ' ai' : ''}${isRetired(racer) ? ' retired' : ''}`);
     row.dataset.racerId = racerId(racer);
-    row.append(element('b', 'screen-order-position', `P${racer.position ?? '–'}`));
+    row.append(element('b', 'screen-order-position', positionLabel(racer)));
     const copy = element('div');
     copy.append(element('strong', '', driverName(racer)), element('small', '', `${crewName(racer.crewId)} · ${racer.isAi ? 'AI' : 'HUMAN'}`));
     const metrics = element('div', 'screen-order-metrics');
     metrics.append(
-      element('strong', 'screen-order-gap', racer.position === 1 ? 'LEADER' : `+${Math.max(0, Math.round(racer.gapMeters ?? 0))}m`),
+      element('strong', 'screen-order-gap', gapLabel(racer)),
       element('small', 'screen-order-speed', `${Math.round(racer.speedKph ?? 0)} km/h`),
     );
     row.append(copy, metrics);
@@ -190,7 +261,7 @@ function telemetry(item) {
   const entries = [
     ['LEADER SPEED', `${Math.round(leader.speedKph ?? race.speedKph ?? 0)} km/h`, 'screen-speed'],
     ['LAP', `${leader.lap ?? race.lap ?? 1}/${race.totalLaps ?? 2}`, 'screen-lap'],
-    ['GATE', `${Math.min(10, (match.encounterIndex ?? 0) + 1)}/10`, 'screen-gate'],
+    ['GATE', `${encounterNumber(item)}/${totalEncounters(item)}`, 'screen-gate'],
     ['BATTERY / RECHARGE', `${Math.round(leader.batteryPercent ?? race.batteryPercent ?? 0)}%`, 'screen-battery'],
     ['BOOST MODE', leader.boostMode ?? race.boostMode ? 'ACTIVE' : 'READY', 'screen-boost'],
     ['OVERTAKE MODE', leader.overtakeMode ?? race.overtakeMode ? 'ACTIVE' : 'LOCKED', 'screen-overtake'],
@@ -226,7 +297,10 @@ function queueGrid(item) {
   const slots = racers.slice(0, 4);
   while (slots.length < 4) slots.push(null);
   const card = element('section', 'screen-queue-card');
-  card.append(element('div', 'screen-queue-copy', `${humanCount}/4 HUMAN DRIVERS`), element('h2', '', '45초가 되면 빈자리에 AI가 합류합니다.'));
+  card.append(
+    element('div', 'screen-queue-copy', `${securityCircuitOf(item).label} · ${difficultyLabel(item)} · ${humanCount}/4 HUMAN`),
+    element('h2', '', '같은 조건만 매칭 · 45초 뒤 빈자리에 AI 합류'),
+  );
   const grid = element('div', 'screen-match-grid');
   grid.dataset.testid = 'screen-match-grid';
   slots.forEach((racer, index) => {
@@ -260,7 +334,7 @@ function joinCard(state) {
   qr.alt = '게임 참가 QR 코드';
   qr.width = 240;
   qr.height = 240;
-  card.append(qr, element('span', '', 'SCAN TO JOIN'), element('strong', '', '팀 → 드라이버 → 난이도'));
+  card.append(qr, element('span', '', 'SCAN TO JOIN'), element('strong', '', '팀 → 드라이버 → 보안 서킷 → 난이도'));
   if (state?.joinUrl) card.append(element('small', 'screen-join-url', state.joinUrl));
   return card;
 }
@@ -277,8 +351,8 @@ function otherHeats(state, featured) {
     const match = matchOf(item);
     const row = element('article', 'screen-heat-row');
     row.append(
-      element('b', '', circuitOf(item).shortLabel ?? circuitOf(item).name ?? 'NITRO GRID'),
-      element('span', '', `${STATUS_LABELS[statusOf(item)] ?? statusOf(item)} · ${racersOf(item).length || match.humanCount || 0}/4`),
+      element('b', '', `${securityCircuitOf(item).shortLabel ?? securityCircuitOf(item).label} · ${difficultyLabel(item)}`),
+      element('span', '', `${STATUS_LABELS[statusOf(item)] ?? statusOf(item)} · ${racersOf(item).length || match.humanCount || 0}/4 · ${circuitOf(item).shortLabel ?? 'COURSE'}`),
       element('strong', '', formatTime(remainingMs(item))),
     );
     rail.append(row);
@@ -300,7 +374,7 @@ function trendBriefing(item) {
 function emptyBoard(state) {
   const card = element('article', 'screen-idle-card');
   card.dataset.testid = 'screen-board';
-  card.append(element('span', '', 'GRID OPEN'), element('h2', '', '첫 4-CAR SECURITY SPRINT를 기다립니다.'), element('p', '', 'QR을 스캔하고 팀, 드라이버, 난이도를 선택하세요. 최대 45초 뒤 AI와 함께 자동 출발합니다.'));
+  card.append(element('span', '', 'GRID OPEN'), element('h2', '', '첫 4-CAR SECURITY SPRINT를 기다립니다.'), element('p', '', 'QR을 스캔하고 팀, 드라이버, 보안 서킷, 난이도를 선택하세요. 같은 조건끼리 매칭되며 최대 45초 뒤 AI와 함께 출발합니다.'));
   const layout = element('div', 'screen-idle-layout');
   layout.append(joinCard(state));
   card.append(layout);
@@ -322,7 +396,10 @@ function render(state) {
   board.dataset.testid = 'screen-board';
   const head = element('header', 'screen-race-head');
   const title = element('div');
-  title.append(element('span', '', `${STATUS_LABELS[status] ?? status} · ${circuit.location ?? 'SECURITY GRAND PRIX'}`), element('h2', '', circuit.name ?? 'NITRO GRID'));
+  title.append(
+    element('span', '', `${STATUS_LABELS[status] ?? status} · ${securityCircuitOf(featured).label} · ${difficultyLabel(featured)}`),
+    element('h2', '', circuit.name ?? 'NITRO GRID'),
+  );
   const time = element('div', 'screen-feature-clock');
   time.append(element('span', '', status === 'MATCHING' ? 'AI JOIN' : 'NEXT GATE'), element('b', '', formatTime(remainingMs(featured))));
   head.append(title, time);
@@ -377,7 +454,7 @@ function updateTrack(item) {
     const tangentY = dy / magnitude;
     const normalX = -tangentY;
     const normalY = tangentX;
-    const slot = Math.abs(Number(racer.seat ?? racer.position ?? index + 1) - 1) % 4;
+    const slot = Math.abs(Number(racer.seat ?? index + 1) - 1) % 4;
     const tangentOffset = [-42, -14, 14, 42][slot];
     const normalOffset = [-18, 18, -18, 18][slot];
     const x = point.x + tangentX * tangentOffset + normalX * normalOffset;
@@ -385,7 +462,7 @@ function updateTrack(item) {
     const angle = Math.atan2(dy, dx) * (180 / Math.PI);
     marker.setAttribute('transform', `translate(${x.toFixed(2)} ${y.toFixed(2)}) rotate(${angle.toFixed(2)})`);
     const label = marker.querySelector('.marker-position');
-    if (label) label.textContent = String(racer.position ?? '–');
+    if (label) label.textContent = isRetired(racer) ? 'R' : String(racer.position ?? '–');
   });
 }
 
@@ -404,7 +481,7 @@ function updateLive(item) {
   setText('.screen-grid-clock', formatTime(match.startsInMs ?? 0));
   setText('#screen-speed', `${Math.round(leader.speedKph ?? race.speedKph ?? 0)} km/h`);
   setText('#screen-lap', `${leader.lap ?? race.lap ?? 1}/${race.totalLaps ?? 2}`);
-  setText('#screen-gate', `${Math.min(10, (match.encounterIndex ?? 0) + 1)}/10`);
+  setText('#screen-gate', `${encounterNumber(item)}/${totalEncounters(item)}`);
   setText('#screen-battery', `${Math.round(leader.batteryPercent ?? race.batteryPercent ?? 0)}%`);
   setText('#screen-boost', leader.boostMode ?? race.boostMode ? 'ACTIVE' : 'READY');
   setText('#screen-overtake', leader.overtakeMode ?? race.overtakeMode ? 'ACTIVE' : 'LOCKED');
@@ -412,8 +489,9 @@ function updateLive(item) {
   for (const racer of racersOf(item)) {
     const row = [...document.querySelectorAll('.screen-order-row')].find((node) => node.dataset.racerId === racerId(racer));
     if (!row) continue;
-    row.querySelector('.screen-order-position').textContent = `P${racer.position ?? '–'}`;
-    row.querySelector('.screen-order-gap').textContent = racer.position === 1 ? 'LEADER' : `+${Math.max(0, Math.round(racer.gapMeters ?? 0))}m`;
+    row.classList.toggle('retired', isRetired(racer));
+    row.querySelector('.screen-order-position').textContent = positionLabel(racer);
+    row.querySelector('.screen-order-gap').textContent = gapLabel(racer);
     row.querySelector('.screen-order-speed').textContent = `${Math.round(racer.speedKph ?? 0)} km/h`;
     row.parentElement.append(row);
   }
@@ -425,6 +503,7 @@ function updateHeader(state) {
   const activeCount = groups.active.length;
   const pendingCount = groups.pending.length;
   statusNode.textContent = `${activeCount} LIVE · ${pendingCount} MATCHING`;
+  if (formatNode) formatNode.textContent = `동일 난이도+보안 서킷 4대 매칭 · 30–45초 · 빈자리는 동일 조건 AI · ${catalogEncounterLabel()} Security Encounters`;
   clockNode.textContent = new Intl.DateTimeFormat('ko-KR', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }).format(new Date());
 }
 
@@ -433,7 +512,11 @@ async function refresh() {
     const response = await fetch('/api/screen-state', { cache: 'no-store' });
     if (!response.ok) throw new Error('screen_state_failed');
     latest = await response.json();
-    catalogs = latest.catalogs ?? latest.catalog ?? catalogs;
+    catalogs = { ...catalogs, ...(latest.catalogs ?? latest.catalog ?? {}) };
+    if (!catalogs.match) {
+      const catalogResponse = await fetch('/api/catalog', { cache: 'no-store' });
+      if (catalogResponse.ok) catalogs = { ...catalogs, ...(await catalogResponse.json()) };
+    }
     updateHeader(latest);
     const key = structuralKey(latest);
     if (key !== renderKey) {

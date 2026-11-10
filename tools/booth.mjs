@@ -22,7 +22,7 @@ const productionTiming = Object.freeze({
   matchMinWaitMs: 30_000,
   matchMaxWaitMs: 45_000,
   gridCountdownMs: 5_000,
-  encounterDurationMs: 18_000,
+  encounterDurationMs: 15_000,
   minEncounterMs: 4_000,
   resultDurationMs: 25_000,
 });

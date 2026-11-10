@@ -1,4 +1,4 @@
-const REVIEWED_AT = '2026-11-10';
+const REVIEWED_AT = '2026-11-11';
 const t = (id, eyebrow, title, summary, actions, publisher, sourceTitle, url, publishedAt) => Object.freeze({
   id, eyebrow, title, summary, actions: Object.freeze(actions), scoring: false, reviewedAt: REVIEWED_AT,
   source: Object.freeze({ publisher, title: sourceTitle, url, publishedAt }),
@@ -11,7 +11,7 @@ export const TRENDS = Object.freeze([
   t('trend-vishing-saas-identity', '2026 SECURITY TREND', '전화 한 통이 SaaS 세션과 OAuth 토큰으로 이어진다',
     'M-Trends 2026은 2025 조사에서 음성 피싱이 두 번째로 많이 관측된 초기 침투 벡터가 되었고, 장기 OAuth 토큰과 세션 쿠키가 연쇄 침해에 악용됐다고 보고했습니다.',
     ['헬프데스크 독립 신원 검증', 'SaaS 연동·토큰 정기 점검', '세션 폐기 훈련'],
-    'Google Cloud / Mandiant', 'M-Trends 2026', 'https://cloud.google.com/blog/topics/threat-intelligence/m-trends-2026', '2026-03-24'),
+    'Google Cloud / Mandiant', 'M-Trends 2026', 'https://cloud.google.com/blog/topics/threat-intelligence/m-trends-2026', '2026-03-23'),
   t('trend-kev-prioritization', 'OPERATIONAL TREND', '패치 경주는 CVSS 숫자 하나로 결정하지 않는다',
     'CISA의 KEV 카탈로그는 실제 악용이 확인된 취약점을 식별합니다. 우선순위는 KEV 여부에 더해 인터넷 노출, 자산 중요도, 영향과 보완 통제를 함께 판단해야 합니다.',
     ['KEV와 자산 목록 연결', '외부 노출 확인', '완화 후 검증'],

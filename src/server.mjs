@@ -72,6 +72,8 @@ function statusFor(error) {
     wrong_match: 409,
     wrong_round: 409,
     idempotency_conflict: 409,
+    solo_start_unavailable: 409,
+    invalid_security_circuit: 400,
     invalid_choice: 400,
     invalid_circuit: 400,
     invalid_crew: 400,
@@ -182,8 +184,13 @@ export async function createGameServer({
         if (!/^[a-f0-9]{32}$/.test(body.deviceId ?? '')) return sendJson(res, 400, { error: 'invalid_device_id' });
         const identity = store.join(
           bearer(req), body.deviceId, body.difficulty, body.crewId, body.driverId,
+          body.securityCircuitId,
         );
         return sendJson(res, 201, identity);
+      }
+      if (req.method === 'POST' && url.pathname === '/api/start-with-ai') {
+        await jsonBody(req);
+        return sendJson(res, 200, store.startWithAi(bearer(req)));
       }
       if (req.method === 'GET' && url.pathname === '/api/state') {
         return sendJson(res, 200, store.state(bearer(req)));

@@ -1,6 +1,51 @@
-import { HEAT_SIZE, PRODUCTION_TIMING, TOTAL_ENCOUNTERS, TOTAL_LAPS } from '../clock.mjs';
+import {
+  HEAT_SIZE, MAX_ENCOUNTERS, MIN_ENCOUNTERS, PRODUCTION_TIMING, TOTAL_LAPS,
+} from '../clock.mjs';
 
 export const DIFFICULTIES = Object.freeze(['BEGINNER', 'ADVANCED']);
+export const DIFFICULTY_DETAILS = Object.freeze([
+  Object.freeze({
+    id: 'BEGINNER',
+    label: '초급~중급',
+    description: '핵심 근거와 실무 기본기를 중심으로 판단합니다.',
+  }),
+  Object.freeze({
+    id: 'ADVANCED',
+    label: '고급',
+    description: '압축된 기술 증거와 복합 보안 판단을 다룹니다.',
+  }),
+]);
+export const SECURITY_CIRCUITS = Object.freeze([
+  Object.freeze({
+    id: 'WHITE',
+    label: '화이트 서킷',
+    shortLabel: 'WHITE',
+    description: '허가 범위 확인, 정찰, 안전한 검증, 수정 확인을 중심으로 판단합니다.',
+    focus: Object.freeze(['scope', 'recon', 'validation', 'remediation']),
+  }),
+  Object.freeze({
+    id: 'RED',
+    label: '레드 서킷',
+    shortLabel: 'RED',
+    description: '공격자 관점, 악용 전제, 공격 사슬과 권한 경계를 중심으로 판단합니다.',
+    focus: Object.freeze(['adversary', 'exploitability', 'attack-chain']),
+  }),
+  Object.freeze({
+    id: 'BLUE',
+    label: '블루 서킷',
+    shortLabel: 'BLUE',
+    description: '탐지, 사고 대응, 차단, 복구와 재발 방지를 중심으로 판단합니다.',
+    focus: Object.freeze(['detection', 'incident-response', 'hardening']),
+  }),
+  Object.freeze({
+    id: 'FULL_STACK',
+    label: '풀 스택 서킷',
+    shortLabel: 'RED + BLUE',
+    description: '레드와 블루 문제를 문항 수 차이 1개 이내로 균형 있게 구성합니다.',
+    focus: Object.freeze(['red', 'blue', 'balanced']),
+  }),
+]);
+export const BALANCE_DISCLAIMER = '팀 성능과 드라이버 스킬 수치는 이 교육용 게임의 밸런스 메타데이터이며 실제 인물·팀의 객관적 평가나 공식 성능 지표가 아닙니다.';
 
 export const CIRCUITS = Object.freeze([
   Object.freeze({
@@ -66,63 +111,71 @@ export const CREWS = Object.freeze([
   Object.freeze({
     id: 'red-bull-racing', name: 'RED BULL RACING', color: '#3155ff', accent: '#ff334f',
     trait: '공격적인 레이스 운영', model: 'RB22', asset: '/assets/cars/red-bull-racing.svg',
-    photoAsset: '/assets/team-cars/red-bull-rb22-2026.webp',
+    photoAsset: '/assets/team-cars/red-bull-rb22-2026.webp', performanceRating: 88,
   }),
   Object.freeze({
     id: 'ferrari', name: 'FERRARI', color: '#ef1a2d', accent: '#ffd54a',
     trait: '정교한 피트 전략', model: 'SF-26', asset: '/assets/cars/ferrari.svg',
-    photoAsset: '/assets/team-cars/ferrari-sf26-2026.webp',
+    photoAsset: '/assets/team-cars/ferrari-sf26-2026.webp', performanceRating: 87,
   }),
   Object.freeze({
     id: 'mercedes', name: 'MERCEDES', color: '#00d2be', accent: '#d8f5f2',
     trait: '데이터 기반 판단', model: 'W17', asset: '/assets/cars/mercedes.svg',
-    photoAsset: '/assets/team-cars/mercedes-w17-2026.webp',
+    photoAsset: '/assets/team-cars/mercedes-w17-2026.webp', performanceRating: 86,
   }),
   Object.freeze({
     id: 'mclaren', name: 'MCLAREN', color: '#ff8700', accent: '#57d5ff',
     trait: '민첩한 구간 대응', model: 'MCL40', asset: '/assets/cars/mclaren.svg',
-    photoAsset: '/assets/team-cars/mclaren-mcl40-2026.webp',
+    photoAsset: '/assets/team-cars/mclaren-mcl40-2026.webp', performanceRating: 88,
   }),
 ]);
 
 export const DRIVERS = Object.freeze([
   Object.freeze({
     id: 'max-verstappen', name: 'Max Verstappen', crewId: 'red-bull-racing', number: 3, country: 'NED',
+    skillRating: 90,
     role: 'Red Bull Racing · #3', media: '/assets/driver-panels/max-verstappen.webp',
     sourceUrl: 'https://giphy.com/gifs/redbullracing-f1-red-bull-racing-Irb20yXtA2QStkUnrE',
   }),
   Object.freeze({
     id: 'isack-hadjar', name: 'Isack Hadjar', crewId: 'red-bull-racing', number: 6, country: 'FRA',
+    skillRating: 85,
     role: 'Red Bull Racing · #6', media: '/assets/driver-panels/isack-hadjar.webp',
     sourceUrl: 'https://giphy.com/gifs/f1-formula-1-formel-MI89BswFFetH9CbUwH',
   }),
   Object.freeze({
     id: 'charles-leclerc', name: 'Charles Leclerc', crewId: 'ferrari', number: 16, country: 'MON',
+    skillRating: 89,
     role: 'Ferrari · #16', media: '/assets/driver-panels/charles-leclerc.webp',
     sourceUrl: 'https://giphy.com/gifs/f1-ferrari-leclerc-charles-M9BLGQ8f2MvWVQZtTR',
   }),
   Object.freeze({
     id: 'lewis-hamilton', name: 'Lewis Hamilton', crewId: 'ferrari', number: 44, country: 'GBR',
+    skillRating: 89,
     role: 'Ferrari · #44', media: '/assets/driver-panels/lewis-hamilton.webp',
     sourceUrl: 'https://giphy.com/gifs/f1-ferrari-meme-CSoa7JDs8We3wrZcxZ',
   }),
   Object.freeze({
     id: 'george-russell', name: 'George Russell', crewId: 'mercedes', number: 63, country: 'GBR',
+    skillRating: 88,
     role: 'Mercedes · #63', media: '/assets/driver-panels/george-russell.webp',
     sourceUrl: 'https://giphy.com/gifs/f1-formula-1-formel-BvcNdKvRPwzv09HJVI',
   }),
   Object.freeze({
     id: 'kimi-antonelli', name: 'Kimi Antonelli', crewId: 'mercedes', number: 12, country: 'ITA',
+    skillRating: 86,
     role: 'Mercedes · #12', media: '/assets/driver-panels/kimi-antonelli.webp',
     sourceUrl: 'https://giphy.com/gifs/f1-formula1-kimiantonellimercedes-kTCZt1IIMXYmHVoNFj',
   }),
   Object.freeze({
     id: 'lando-norris', name: 'Lando Norris', crewId: 'mclaren', number: 1, country: 'GBR',
+    skillRating: 90,
     role: 'McLaren · #1', media: '/assets/driver-panels/lando-norris.webp',
     sourceUrl: 'https://giphy.com/gifs/f1-formula-1-aishi-YDUaNBTTy1GdNSZZRe',
   }),
   Object.freeze({
     id: 'oscar-piastri', name: 'Oscar Piastri', crewId: 'mclaren', number: 81, country: 'AUS',
+    skillRating: 89,
     role: 'McLaren · #81', media: '/assets/driver-panels/oscar-piastri.webp',
     sourceUrl: 'https://giphy.com/gifs/f1-formula-1-formel-xhTa2oPQNeJ2596Z9t',
   }),
@@ -151,12 +204,24 @@ export function validateDifficulty(value) {
   return value;
 }
 
+export function validateSecurityCircuit(value) {
+  if (!SECURITY_CIRCUITS.some(({ id }) => id === value)) {
+    const error = new Error('invalid_security_circuit');
+    error.code = 'invalid_security_circuit';
+    throw error;
+  }
+  return value;
+}
+
 export function publicRaceCatalog(timing = PRODUCTION_TIMING) {
   return {
     circuits: CIRCUITS,
     crews: CREWS,
     drivers: DRIVERS,
     difficulties: DIFFICULTIES,
+    difficultyDetails: DIFFICULTY_DETAILS,
+    securityCircuits: SECURITY_CIRCUITS,
+    balanceDisclaimer: BALANCE_DISCLAIMER,
     match: {
       seats: HEAT_SIZE,
       minWaitMs: timing.minWaitMs,
@@ -165,7 +230,8 @@ export function publicRaceCatalog(timing = PRODUCTION_TIMING) {
       encounterMs: timing.encounterMs,
       minimumExposureMs: timing.minimumExposureMs,
       resultMs: timing.resultMs,
-      totalEncounters: TOTAL_ENCOUNTERS,
+      minEncounters: MIN_ENCOUNTERS,
+      maxEncounters: MAX_ENCOUNTERS,
       totalLaps: TOTAL_LAPS,
     },
   };

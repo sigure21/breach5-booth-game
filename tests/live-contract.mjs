@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
-import { QUESTION_BANK } from '../src/content/questions.mjs';
+import { QUESTION_BANKS } from '../src/content/questions.mjs';
 
 const target = new URL(process.env.TARGET_URL ?? 'http://127.0.0.1:18091');
 const deadline = Date.now() + 30_000;
-const answers = new Map(QUESTION_BANK.map((question) => [question.id, question.correctOptionId]));
+const answers = new Map(
+  Object.values(QUESTION_BANKS).flat().map((question) => [question.id, question.correctOptionId]),
+);
 let deviceSequence = 0;
 
 const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -41,6 +43,7 @@ async function join(catalog, overrides = {}) {
   const body = {
     deviceId,
     difficulty: overrides.difficulty ?? 'BEGINNER',
+    securityCircuitId: overrides.securityCircuitId ?? 'FULL_STACK',
     crewId: crew.id,
     driverId: driver.id,
     ...(overrides.extra ?? {}),
@@ -89,6 +92,24 @@ function assertNoRetiredTelemetry(value) {
   walk(value);
 }
 
+function assertNoPrivateScoring(value) {
+  const forbidden = new Set([
+    'servertier', 'servertiers', 'serverweighttier', 'weighttier', 'weight', 'weights',
+    'points', 'earned', 'earnedweight', 'possibleweight', 'possibleweighted', 'knowledge',
+    'knowledgescore', 'racescore', 'rankingscore', 'internalrankingscore', 'hardp4',
+    'rankvalue', 'aiskill', 'aiordinal', 'airesults', 'rawpoints', 'maxpoints',
+    'wrongcount', 'threshold', 'thresholds',
+  ]);
+  const walk = (entry) => {
+    if (!entry || typeof entry !== 'object') return;
+    for (const [key, child] of Object.entries(entry)) {
+      assert.equal(forbidden.has(key.toLowerCase()), false, `private scoring field leaked: ${key}`);
+      walk(child);
+    }
+  };
+  walk(value);
+}
+
 const ready = await request('/readyz');
 assert.equal(ready.response.status, 200);
 assert.deepEqual(ready.value, { ok: true, service: 'nitro-grid' });
@@ -104,8 +125,9 @@ assert.deepEqual(catalog.difficulties, ['BEGINNER', 'ADVANCED']);
 assert.deepEqual(catalog.match, {
   seats: 4, minWaitMs: 300, maxWaitMs: 450, gridMs: 100,
   encounterMs: 300, minimumExposureMs: 75, resultMs: 300,
-  totalEncounters: 10, totalLaps: 2,
+  minEncounters: 10, maxEncounters: 15, totalLaps: 2,
 });
+assertNoPrivateScoring(catalog);
 for (const circuit of catalog.circuits) {
   assert.equal(circuit.laps, 2);
   assert.ok(circuit.minSpeedKph < circuit.maxSpeedKph && circuit.maxSpeedKph <= 360);
@@ -159,20 +181,28 @@ assert.ok(Date.now() - fifthCreatedAt >= catalog.match.maxWaitMs - 80, 'AI fill 
 assert.equal(fifthStarted.match.humanCount, 1);
 assert.equal(fifthStarted.match.aiCount, 3);
 assert.equal(fifthStarted.race.racers.length, 4);
+assert.ok(fifthStarted.race.racers.every(({ difficulty, securityCircuitId }) => (
+  difficulty === fifth.difficulty && securityCircuitId === fifth.securityCircuitId
+)), 'AI racers did not inherit the heat difficulty and security circuit');
 
 const reconnect = await join(catalog, {
   token: fifth.token, deviceId: fifth.deviceId, crew: catalog.crews[2], difficulty: 'BEGINNER',
 });
-const identityKeys = ['token', 'matchId', 'callsign', 'circuitId', 'difficulty', 'crewId', 'driverId'];
+const identityKeys = [
+  'token', 'matchId', 'callsign', 'circuitId', 'difficulty', 'securityCircuitId', 'crewId', 'driverId',
+];
 assert.deepEqual(
   Object.fromEntries(identityKeys.map((key) => [key, reconnect[key]])),
   Object.fromEntries(identityKeys.map((key) => [key, fifth[key]])),
 );
 
 let state = await waitForState(fifth, ({ match }) => match.status === 'RACING', 'race start');
+const totalEncounters = state.match.totalEncounters;
+assert.ok(totalEncounters >= catalog.match.minEncounters && totalEncounters <= catalog.match.maxEncounters);
+assertNoPrivateScoring(state);
 const seenQuestions = new Set();
 const seenLaps = new Set();
-for (let encounter = 1; encounter <= 10; encounter += 1) {
+for (let encounter = 1; encounter <= totalEncounters; encounter += 1) {
   state = await waitForState(
     fifth,
     (value) => value.match.status === 'RACING'
@@ -210,6 +240,7 @@ for (let encounter = 1; encounter <= 10; encounter += 1) {
   assert.equal(verdict.value.feedback.correct, encounter !== 1);
   assert.match(verdict.value.feedback.explanation, /\S/);
   assert.match(verdict.value.feedback.effect, /\S/);
+  assertNoPrivateScoring(verdict.value);
 
   if (encounter === 1) {
     const replay = await request('/api/action', { token: fifth.token, method: 'POST', body: action });
@@ -230,16 +261,23 @@ for (let encounter = 1; encounter <= 10; encounter += 1) {
   );
 }
 
-assert.equal(seenQuestions.size, 10);
+assert.equal(seenQuestions.size, totalEncounters);
 assert.deepEqual([...seenLaps].sort(), [1, 2]);
 const resultState = await waitForState(fifth, ({ match }) => match.status === 'RESULT', 'result');
 assert.equal(resultState.result.classification.length, 4);
-assert.deepEqual(resultState.result.classification.map(({ position }) => position), [1, 2, 3, 4]);
-assert.equal(resultState.result.review.length, 10);
-assert.equal(resultState.result.answered, 10);
-assert.equal(resultState.result.correct, 9);
+const liveClassifiedPositions = resultState.result.classification
+  .filter(({ retired }) => !retired).map(({ position }) => position);
+assert.deepEqual(liveClassifiedPositions,
+  Array.from({ length: liveClassifiedPositions.length }, (_, index) => index + 1));
+assert.ok(resultState.result.classification.filter(({ retired }) => retired)
+  .every(({ position }) => position === null));
+assert.equal(resultState.result.review.length, totalEncounters);
+assert.equal(resultState.result.answered, totalEncounters);
+assert.equal(resultState.result.correct, totalEncounters - 1);
 assertNoRetiredTelemetry(resultState);
+assertNoPrivateScoring(resultState);
 const resultScreen = (await request('/api/screen-state')).value;
+assertNoPrivateScoring(resultScreen);
 assert.ok(resultScreen.active.some(({ id, status }) => id === fifth.matchId && status === 'RESULT'));
 
 await waitForState(fifth, ({ match }) => match.status === 'COMPLETE', 'completion');
@@ -249,7 +287,7 @@ const retry = await join(catalog, {
 assert.notEqual(retry.token, fifth.token);
 assert.notEqual(retry.matchId, fifth.matchId);
 assert.equal(retry.circuitId, catalog.circuits[2].id);
-await waitForState(retry, ({ match }) => match.status === 'COMPLETE', 'retry heat completion', 6_000);
+await waitForState(retry, ({ match }) => match.status === 'COMPLETE', 'retry heat completion', 8_000);
 
 while (Date.now() < deadline) {
   const screen = (await request('/api/screen-state')).value;
@@ -257,6 +295,7 @@ while (Date.now() < deadline) {
   await sleep(25);
 }
 const clearScreen = (await request('/api/screen-state')).value;
+assertNoPrivateScoring(clearScreen);
 assert.equal(clearScreen.pending.length, 0);
 assert.equal(clearScreen.active.length, 0);
 
@@ -269,6 +308,7 @@ const capacity = await request('/api/join', {
   body: {
     deviceId: nextDeviceId(),
     difficulty: 'BEGINNER',
+    securityCircuitId: 'FULL_STACK',
     crewId: catalog.crews[0].id,
     driverId: driverFor(catalog, catalog.crews[0]).id,
   },
@@ -276,6 +316,7 @@ const capacity = await request('/api/join', {
 assert.equal(capacity.response.status, 429);
 assert.deepEqual(capacity.value, { error: 'capacity' });
 const fullScreen = (await request('/api/screen-state')).value;
+assertNoPrivateScoring(fullScreen);
 assert.equal(fullScreen.joinMode, 'FULL');
 assert.equal(fullScreen.pending.length + fullScreen.active.length, 12);
 assert.ok([...fullScreen.pending, ...fullScreen.active]

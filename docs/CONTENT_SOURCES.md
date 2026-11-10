@@ -1,20 +1,29 @@
 # Security content sources
 
-Last reviewed: **2026-11-10**
+Last reviewed: **2026-11-11**
 
 ## Scope and method
 
-The 30 encounters are short educational decisions, not organization-specific
-incident-response instructions. Each answer is based on a visible fact in the
+The bank contains 128 paired concepts rendered as 128 beginner-to-intermediate
+and 128 advanced playable variants. Each heat selects 10–15 short educational
+decisions; they are not organization-specific incident-response instructions.
+Each answer is based on a visible fact in the
 scenario and a broadly accepted control: phishing-resistant authentication,
 independent verification, server-side authorization, parameterized queries,
 context-aware output encoding, allowlisted outbound access, least privilege,
 credential rotation, tested recovery, or containment followed by investigation.
 
-The beginner and advanced modes use the same question, choices, correct answer,
-and score. Only the amount of annotation around the evidence changes. Trend
-cards never affect scoring. Statistics are not used to decide whether a player
-answer is correct.
+The two modes share a security concept but use different prompts, evidence
+language and option wording. Beginner-to-intermediate questions emphasize a
+clear operational decision; advanced questions emphasize trust boundaries,
+attack preconditions, negative controls and remediation priority. Trend cards
+never affect scoring. Statistics are not used to decide whether a player answer
+is correct.
+
+Every scored item has one primary circuit classification: `WHITE` for authorized
+assessment practice, `RED` for adversary and attack-chain reasoning, or `BLUE`
+for prevention, detection, response and recovery. `FULL_STACK` is not a fourth
+content label; it selects only `RED` and `BLUE` items in a balanced deck.
 
 ## Baseline guidance for the question bank
 
@@ -28,6 +37,14 @@ answer is correct.
 | Secure software lifecycle | [NIST SP 800-218 SSDF 1.1](https://csrc.nist.gov/pubs/sp/800/218/final) | dependency provenance, build controls, and secure development practices |
 | Incident response | [NIST SP 800-61 Rev. 3](https://csrc.nist.gov/pubs/sp/800/61/r3/final) | preparation, detection, response, recovery, and post-incident improvement |
 | Ransomware response | [CISA #StopRansomware Guide](https://www.cisa.gov/stopransomware/ransomware-guide) | containment, evidence preservation, recovery planning, and tested backups |
+| OAuth authorization-code security | [RFC 9700](https://www.rfc-editor.org/rfc/rfc9700.html) and [RFC 7636](https://www.rfc-editor.org/rfc/rfc7636.html) | exact redirect handling, PKCE, token and grant containment |
+| API authorization and resource abuse | [OWASP API Security Top 10:2023](https://owasp.org/API-Security/editions/2023/en/0x11-t10/) | object-level authorization, consumption limits, positive and negative controls |
+| Container workload isolation | [Kubernetes Pod Security Standards](https://kubernetes.io/docs/concepts/security/pod-security-standards/) | non-root workloads, privilege reduction, host and service-account boundaries |
+| Build provenance | [SLSA specification](https://slsa.dev/spec/) | artifact identity, builder/source attestations and admission checks |
+| Generative-AI application risk | [OWASP Top 10 for LLM and GenAI Applications:2025](https://genai.owasp.org/llm-top-10/) and [NIST AI RMF](https://www.nist.gov/itl/ai-risk-management-framework) | prompt injection, sensitive-data handling, bounded agent authority and output trust |
+| Post-quantum migration | [NIST IR 8547](https://csrc.nist.gov/pubs/ir/8547/final) and [NIST PQC publications](https://csrc.nist.gov/projects/post-quantum-cryptography/publications) | cryptographic inventory, transition planning and crypto agility |
+| Email trust and BEC | [NIST SP 800-177 Rev. 1](https://csrc.nist.gov/pubs/sp/800/177/r1/final) | domain authentication as one signal plus independent business-process verification |
+| Authorized security assessment | [NIST SP 800-115](https://csrc.nist.gov/pubs/sp/800/115/final) | planning authorized tests, defining scope and constraints, conducting bounded assessment, analyzing findings and validating mitigation |
 
 The scenarios intentionally omit vendor-specific procedures. In a real event,
 the organization's approved playbook, legal obligations, asset context, and
@@ -51,7 +68,7 @@ The `officialLengthKm` and `officialRaceLaps` fields in the public catalog are r
 | Card | Official source | Source date | Bounded claim used in the game |
 |---|---|---:|---|
 | AI speed and security fundamentals | [Microsoft Digital Defense Report 2026](https://www.microsoft.com/en-us/security/security-insider/threat-landscape/2026-digital-defense-report) | 2026-10-01 | AI increases attack speed and scale, while user execution and valid accounts remain material initial-access paths. |
-| Vishing and SaaS identity | [Google Cloud/Mandiant M-Trends 2026](https://cloud.google.com/blog/topics/threat-intelligence/m-trends-2026) | 2026-03-24 | Voice phishing rose to the second-most observed initial infection vector in the cited investigations; stolen OAuth tokens and session cookies can enable downstream access. |
+| Vishing and SaaS identity | [Google Cloud/Mandiant M-Trends 2026](https://cloud.google.com/blog/topics/threat-intelligence/m-trends-2026) | 2026-03-23 | Voice phishing rose to the second-most observed initial infection vector in the cited investigations; stolen OAuth tokens and session cookies can enable downstream access. |
 | Exploited-vulnerability prioritization | [CISA KEV Catalog](https://www.cisa.gov/known-exploited-vulnerabilities-catalog) | continuously updated | KEV records vulnerabilities with evidence of exploitation; operational priority still needs asset and exposure context. |
 | Cyber dependencies | [ENISA Threat Landscape 2026](https://www.enisa.europa.eu/publications/enisa-threat-landscape-2026) | 2026-09-22 | Digital dependencies expand the attack surface and need to be considered in resilience planning. |
 | Software supply chain | [OWASP Top 10:2025 A03](https://top10.owasp.org/2025/A03_2025-Software_Supply_Chain_Failures/) | 2025 | Supply-chain risk covers dependencies, build/distribution systems, provenance, and change controls, not only outdated packages. |
@@ -61,8 +78,8 @@ The `officialLengthKm` and `officialRaceLaps` fields in the public catalog are r
 
 ## Review rule
 
-Before an event release, an operator should open every trend-card URL, confirm
-that the title and claim still match the primary source, update `reviewedAt` in
-`src/content/trends.mjs`, and run `npm run check`. If a report moves or a claim
-cannot be verified, remove or replace the card rather than preserving a stale
-statistic.
+Before an event release, an operator should open every trend-card URL and a
+sample from every scored topic family, confirm that the title and bounded claim
+still match the cited source, update `reviewedAt` in `src/content/trends.mjs`,
+and run `npm run check`. If a report moves or a claim cannot be verified, remove
+or replace the card or question rather than preserving a stale statistic.
