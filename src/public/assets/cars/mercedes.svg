@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 160" role="img" aria-labelledby="title desc">
+  <title id="title">Mercedes colorway car</title>
+  <desc id="desc">An original silver, black, and teal open-wheel racing car illustration made for Nitro Grid.</desc>
+  <defs>
+    <linearGradient id="body" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#e4eeee"/><stop offset=".42" stop-color="#6e7b80"/><stop offset="1" stop-color="#161d21"/></linearGradient>
+    <filter id="glow" x="-40%" y="-80%" width="180%" height="260%"><feGaussianBlur stdDeviation="5"/></filter>
+  </defs>
+  <ellipse cx="202" cy="133" rx="150" ry="9" fill="#00d2be" opacity=".27" filter="url(#glow)"/>
+  <g stroke-linejoin="round">
+    <path d="M31 106 60 99l23-42h60l34 20 105 5 44 20 35 6-7 21H45z" fill="url(#body)" stroke="#d8f5f2" stroke-width="3"/>
+    <path d="m144 58 18 24h70l-38-24z" fill="#081316" stroke="#7dede2" stroke-width="3"/>
+    <path d="M280 83h64l18 15-75 1zM39 100h50l-13 13H28z" fill="#05090b" stroke="#4e6266" stroke-width="2"/>
+    <path d="M150 92h128l-30 17H128z" fill="#00d2be"/>
+    <path d="M184 100h66" stroke="#d8f5f2" stroke-width="4" stroke-linecap="round"/>
+    <circle cx="105" cy="124" r="23" fill="#05090b" stroke="#273438" stroke-width="5"/><circle cx="105" cy="124" r="10" fill="#00d2be" stroke="#91fff5" stroke-width="3"/>
+    <circle cx="302" cy="124" r="23" fill="#05090b" stroke="#273438" stroke-width="5"/><circle cx="302" cy="124" r="10" fill="#00d2be" stroke="#91fff5" stroke-width="3"/>
+    <path d="M101 70h47" stroke="#00d2be" stroke-width="5" stroke-linecap="round"/>
+  </g>
+</svg>

@@ -2,13 +2,8 @@ import { readFile } from 'node:fs/promises';
 import http from 'node:http';
 import { fileURLToPath } from 'node:url';
 import QRCode from 'qrcode';
-import {
-  AdjudicatorRegistry,
-  ProxyPanicAdjudicator,
-  SessionHeistAdjudicator,
-} from './adjudicator.mjs';
 import { GameStore } from './game.mjs';
-import { DIFFICULTIES, publicCatalog } from './scenarios/index.mjs';
+import { publicRaceCatalog } from './race/catalog.mjs';
 
 const ROOT = fileURLToPath(new URL('../', import.meta.url));
 const PUBLIC_ROOT = fileURLToPath(new URL('./public/', import.meta.url));
@@ -68,8 +63,11 @@ function statusFor(error) {
     phase_closed: 409,
     choice_locked: 409,
     wrong_round: 409,
+    idempotency_conflict: 409,
     invalid_choice: 400,
-    invalid_scenario: 400,
+    invalid_track: 400,
+    invalid_crew: 400,
+    invalid_driver: 400,
     invalid_difficulty: 400,
     invalid_action_id: 400,
     invalid_json: 400,
@@ -84,10 +82,9 @@ function publicError(error) {
 
 export async function createGameServer({
   store,
-  adjudicator,
   publicBaseUrl,
 } = {}) {
-  if (!store || !adjudicator) throw new Error('store and adjudicator are required');
+  if (!store) throw new Error('store is required');
   const publicBase = new URL(publicBaseUrl);
   if (!['http:', 'https:'].includes(publicBase.protocol) || publicBase.username || publicBase.password) {
     throw new Error('publicBaseUrl must be an http(s) URL without credentials');
@@ -101,10 +98,23 @@ export async function createGameServer({
     ['/assets/app.css', 'app.css', 'text/css; charset=utf-8'],
     ['/assets/play.js', 'play.js', 'application/javascript; charset=utf-8'],
     ['/assets/screen.js', 'screen.js', 'application/javascript; charset=utf-8'],
+    ['/assets/cars/red-bull-racing.svg', 'assets/cars/red-bull-racing.svg', 'image/svg+xml; charset=utf-8'],
+    ['/assets/cars/ferrari.svg', 'assets/cars/ferrari.svg', 'image/svg+xml; charset=utf-8'],
+    ['/assets/cars/mercedes.svg', 'assets/cars/mercedes.svg', 'image/svg+xml; charset=utf-8'],
+    ['/assets/cars/mclaren.svg', 'assets/cars/mclaren.svg', 'image/svg+xml; charset=utf-8'],
+    ['/assets/driver-panels/max-verstappen.webp', 'assets/driver-panels/max-verstappen.webp', 'image/webp'],
+    ['/assets/driver-panels/isack-hadjar.webp', 'assets/driver-panels/isack-hadjar.webp', 'image/webp'],
+    ['/assets/driver-panels/charles-leclerc.webp', 'assets/driver-panels/charles-leclerc.webp', 'image/webp'],
+    ['/assets/driver-panels/lewis-hamilton.webp', 'assets/driver-panels/lewis-hamilton.webp', 'image/webp'],
+    ['/assets/driver-panels/george-russell.webp', 'assets/driver-panels/george-russell.webp', 'image/webp'],
+    ['/assets/driver-panels/kimi-antonelli.webp', 'assets/driver-panels/kimi-antonelli.webp', 'image/webp'],
+    ['/assets/driver-panels/lando-norris.webp', 'assets/driver-panels/lando-norris.webp', 'image/webp'],
+    ['/assets/driver-panels/oscar-piastri.webp', 'assets/driver-panels/oscar-piastri.webp', 'image/webp'],
   ]) {
     staticFiles.set(path, { body: await readFile(`${PUBLIC_ROOT}${file}`), type });
   }
 
+  const joinBurstLimit = Math.max(96, Math.min(192, (store.maxPlayers ?? 48) * 2));
   let joinWindowStartedAt = 0;
   let joinsInWindow = 0;
   const joinAllowed = () => {
@@ -114,7 +124,7 @@ export async function createGameServer({
       joinsInWindow = 0;
     }
     joinsInWindow += 1;
-    return joinsInWindow <= 24;
+    return joinsInWindow <= joinBurstLimit;
   };
 
   const server = http.createServer(async (req, res) => {
@@ -126,15 +136,17 @@ export async function createGameServer({
       }
       if (req.method === 'GET' && staticFiles.has(url.pathname)) {
         const file = staticFiles.get(url.pathname);
-        return send(res, 200, file.type, file.body);
+        const cache = url.pathname.startsWith('/assets/')
+          ? { 'Cache-Control': 'public, max-age=300' }
+          : {};
+        return send(res, 200, file.type, file.body, cache);
       }
       if (req.method === 'GET' && url.pathname === '/favicon.ico') return send(res, 204, 'image/x-icon', '');
       if (req.method === 'GET' && url.pathname === '/healthz') {
-        return sendJson(res, 200, { ok: true, service: 'breach5-game', round: store.currentClock().roundId });
+        return sendJson(res, 200, { ok: true, service: 'nitro-grid', round: store.currentClock().roundId });
       }
       if (req.method === 'GET' && url.pathname === '/readyz') {
-        const ready = await adjudicator.ready().catch(() => false);
-        return sendJson(res, ready ? 200 : 503, { ok: ready, service: 'breach5-game' });
+        return sendJson(res, 200, { ok: true, service: 'nitro-grid' });
       }
       if (req.method === 'GET' && url.pathname === '/api/qr.svg') {
         const svg = await QRCode.toString(joinUrl, {
@@ -144,13 +156,15 @@ export async function createGameServer({
         return send(res, 200, 'image/svg+xml; charset=utf-8', svg, { 'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'" });
       }
       if (req.method === 'GET' && url.pathname === '/api/catalog') {
-        return sendJson(res, 200, { scenarios: publicCatalog(), difficulties: DIFFICULTIES });
+        return sendJson(res, 200, publicRaceCatalog());
       }
       if (req.method === 'POST' && url.pathname === '/api/join') {
         if (!joinAllowed()) return sendJson(res, 429, { error: 'join_rate_limited' });
         const body = await jsonBody(req);
         if (!/^[a-f0-9]{32}$/.test(body.deviceId ?? '')) return sendJson(res, 400, { error: 'invalid_device_id' });
-        const identity = store.join(bearer(req), body.deviceId, body.scenarioId, body.difficulty);
+        const identity = store.join(
+          bearer(req), body.deviceId, body.trackId, body.difficulty, body.crewId, body.driverId,
+        );
         return sendJson(res, 201, identity);
       }
       if (req.method === 'GET' && url.pathname === '/api/state') {
@@ -159,11 +173,6 @@ export async function createGameServer({
       if (req.method === 'POST' && url.pathname === '/api/action') {
         const body = await jsonBody(req);
         const result = store.submit(bearer(req), body);
-        return sendJson(res, 200, result);
-      }
-      if (req.method === 'POST' && url.pathname === '/api/preview') {
-        const body = await jsonBody(req);
-        const result = store.preview(bearer(req), body);
         return sendJson(res, 200, result);
       }
       if (req.method === 'GET' && url.pathname === '/api/screen-state') {
@@ -186,15 +195,20 @@ export async function createGameServer({
 async function main() {
   const port = boundedInteger(process.env.PORT, 3000, 1, 65_535);
   const host = process.env.HOST ?? '0.0.0.0';
-  const roundMs = boundedInteger(process.env.ROUND_DURATION_MS, 180_000, 3_000, 180_000);
-  const maxPlayers = boundedInteger(process.env.MAX_PLAYERS, 16, 1, 16);
+  const roundMs = boundedInteger(process.env.ROUND_DURATION_MS, 300_000, 3_000, 300_000);
+  const maxPlayers = boundedInteger(process.env.MAX_PLAYERS, 48, 1, 96);
   const publicBaseUrl = process.env.PUBLIC_BASE_URL ?? `http://127.0.0.1:${port}`;
-  const adjudicator = new AdjudicatorRegistry(new Map([
-    ['proxy-panic', new ProxyPanicAdjudicator()],
-    ['session-heist', new SessionHeistAdjudicator()],
-  ]));
-  const store = new GameStore({ adjudicators: adjudicator, roundMs, maxPlayers, epochMs: Date.now() });
-  const server = await createGameServer({ store, adjudicator, publicBaseUrl });
+  const seedSecret = process.env.NITRO_GRID_SEED_SECRET;
+  if (seedSecret && !/^[a-f0-9]{64}$/i.test(seedSecret)) {
+    throw new Error('NITRO_GRID_SEED_SECRET must be a 32-byte hexadecimal value');
+  }
+  const store = new GameStore({
+    roundMs,
+    maxPlayers,
+    epochMs: Date.now(),
+    ...(seedSecret ? { seedSecret } : {}),
+  });
+  const server = await createGameServer({ store, publicBaseUrl });
   const ticker = setInterval(() => {
     store.tick().catch((error) => console.error(`round tick failed: ${error.message}`));
   }, Math.max(100, Math.min(500, Math.round(roundMs / 600))));
@@ -207,7 +221,7 @@ async function main() {
   process.once('SIGTERM', () => shutdown('SIGTERM'));
   process.once('SIGINT', () => shutdown('SIGINT'));
   server.listen(port, host, () => {
-    console.log(`BREACH//5 coordinator listening on ${host}:${port}`);
+    console.log(`BREACH//5: NITRO GRID listening on ${host}:${port}`);
     console.log(`participant: ${publicBaseUrl.replace(/\/$/, '')}/play`);
     console.log(`screen:      ${publicBaseUrl.replace(/\/$/, '')}/screen`);
   });

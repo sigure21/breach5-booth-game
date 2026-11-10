@@ -1,8 +1,11 @@
+import assert from 'node:assert/strict';
 import { existsSync, mkdirSync } from 'node:fs';
 import { chromium } from 'playwright-core';
-import { createDeterministicRegistry } from '../src/adjudicator.mjs';
+import { QUESTION_BANK } from '../src/content/questions.mjs';
 import { GameStore } from '../src/game.mjs';
-import { getScenario } from '../src/scenarios/index.mjs';
+import {
+  CREWS, DIFFICULTIES, DRIVERS, TRACKS,
+} from '../src/race/catalog.mjs';
 import { createGameServer } from '../src/server.mjs';
 
 const candidates = [
@@ -10,7 +13,9 @@ const candidates = [
   'C:/Program Files/Google/Chrome/Application/chrome.exe',
   'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
   'C:/Program Files/Microsoft/Edge/Application/msedge.exe',
-  '/usr/bin/google-chrome', '/usr/bin/chromium', '/usr/bin/chromium-browser',
+  '/usr/bin/google-chrome',
+  '/usr/bin/chromium',
+  '/usr/bin/chromium-browser',
 ].filter(Boolean);
 const executablePath = candidates.find((path) => existsSync(path));
 
@@ -19,15 +24,119 @@ if (!executablePath) {
   process.exit(0);
 }
 
-let now = 0;
-const adjudicator = createDeterministicRegistry();
-const store = new GameStore({ now: () => now, adjudicators: adjudicator });
-const server = await createGameServer({ store, adjudicator, publicBaseUrl: 'http://127.0.0.1:18090' });
-await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
-const origin = `http://127.0.0.1:${server.address().port}`;
+const questions = new Map(QUESTION_BANK.map((question) => [question.id, question]));
 let browser;
 
-async function api(path, { token, method = 'GET', body } = {}) {
+function safeLabel(value) {
+  return value.replaceAll(/[^a-zA-Z0-9_-]+/g, '-').slice(0, 120);
+}
+
+async function assertNoHorizontalOverflow(page, label) {
+  const issues = await page.evaluate(() => {
+    const root = document.documentElement;
+    const viewportWidth = root.clientWidth;
+    const result = [];
+    if (root.scrollWidth > viewportWidth + 1 || document.body.scrollWidth > viewportWidth + 1) {
+      result.push({
+        selector: 'document',
+        viewportWidth,
+        documentWidth: root.scrollWidth,
+        bodyWidth: document.body.scrollWidth,
+      });
+    }
+
+    const selector = (element) => {
+      const name = element.tagName.toLowerCase();
+      const id = element.id ? `#${element.id}` : '';
+      const classes = [...element.classList].slice(0, 3).map((value) => `.${value}`).join('');
+      return `${name}${id}${classes}`;
+    };
+    const clippedByAncestor = (element, rect) => {
+      for (let parent = element.parentElement; parent; parent = parent.parentElement) {
+        const style = getComputedStyle(parent);
+        if (!['hidden', 'clip'].includes(style.overflowX)) continue;
+        const parentRect = parent.getBoundingClientRect();
+        if (rect.left < parentRect.left - 1 || rect.right > parentRect.right + 1) return true;
+      }
+      return false;
+    };
+
+    for (const element of document.querySelectorAll('body *')) {
+      const style = getComputedStyle(element);
+      const rect = element.getBoundingClientRect();
+      if (rect.width < 1 || rect.height < 1 || style.display === 'none' || style.visibility === 'hidden') continue;
+      const nestedScroller = ['auto', 'scroll'].includes(style.overflowX)
+        && element.scrollWidth > element.clientWidth + 1;
+      const outsideViewport = style.position !== 'fixed'
+        && (rect.left < -1 || rect.right > viewportWidth + 1)
+        && !clippedByAncestor(element, rect);
+      if (!nestedScroller && !outsideViewport) continue;
+      result.push({
+        selector: selector(element),
+        overflowX: style.overflowX,
+        clientWidth: element.clientWidth,
+        scrollWidth: element.scrollWidth,
+        left: Math.round(rect.left * 10) / 10,
+        right: Math.round(rect.right * 10) / 10,
+        viewportWidth,
+        nestedScroller,
+        outsideViewport,
+        text: (element.textContent ?? '').trim().replaceAll(/\s+/g, ' ').slice(0, 100),
+      });
+    }
+    return result;
+  });
+
+  if (issues.length === 0) return;
+  mkdirSync('test-results/overflow', { recursive: true });
+  const screenshot = `test-results/overflow/${safeLabel(label)}.png`;
+  await page.screenshot({ path: screenshot, fullPage: true });
+  throw new Error(`${label} horizontal overflow: ${JSON.stringify(issues.slice(0, 12))}; screenshot=${screenshot}`);
+}
+
+async function assertTouchTargets(page, selector, label) {
+  const tooSmall = await page.locator(selector).evaluateAll((elements) => elements
+    .filter((element) => {
+      const style = getComputedStyle(element);
+      return style.display !== 'none' && style.visibility !== 'hidden' && !element.disabled;
+    })
+    .map((element) => ({
+      text: (element.textContent ?? '').trim().slice(0, 60),
+      width: element.getBoundingClientRect().width,
+      height: element.getBoundingClientRect().height,
+    }))
+    .filter(({ height }) => height < 44));
+  if (tooSmall.length) throw new Error(`${label} touch targets below 44px: ${JSON.stringify(tooSmall)}`);
+}
+
+async function createHarness(label) {
+  let now = 0;
+  const store = new GameStore({
+    now: () => now,
+    roundMs: 300_000,
+    seedSecret: `ui-${label}-${'a'.repeat(64)}`.slice(0, 64),
+  });
+  const server = await createGameServer({
+    store,
+    publicBaseUrl: 'http://127.0.0.1:18090',
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  return {
+    store,
+    origin,
+    setNow(value) { now = value; },
+    async advance(milliseconds) {
+      now += milliseconds;
+      await store.tick();
+    },
+    async close() {
+      await new Promise((resolve) => server.close(resolve));
+    },
+  };
+}
+
+async function api(origin, path, { token, method = 'GET', body } = {}) {
   const response = await fetch(`${origin}${path}`, {
     method,
     headers: {
@@ -41,275 +150,301 @@ async function api(path, { token, method = 'GET', body } = {}) {
   return value;
 }
 
-function safeLabel(value) {
-  return value.replaceAll(/[^a-zA-Z0-9_-]+/g, '-').slice(0, 100);
+async function newMobilePage(origin, token = null) {
+  const context = await browser.newContext({
+    viewport: { width: 320, height: 568 },
+    reducedMotion: 'reduce',
+  });
+  if (token) {
+    await context.addInitScript((value) => {
+      sessionStorage.setItem('nitro-grid-player-token', value);
+    }, token);
+  }
+  const page = await context.newPage();
+  await page.goto(`${origin}/play`);
+  return { context, page };
 }
 
-async function assertNoNestedOverflow(page, label) {
-  const issues = await page.evaluate(() => {
-    const viewportWidth = document.documentElement.clientWidth;
-    const ignored = (element) => element.matches([
-      '.ambient',
-      '.landing-card',
-      '.result-card',
-      '.identity-card strong',
-      '.join-url',
-      '.phase-track span',
-    ].join(','));
-    const selector = (element) => {
-      const name = element.tagName.toLowerCase();
-      const id = element.id ? `#${element.id}` : '';
-      const classes = [...element.classList].slice(0, 3).map((value) => `.${value}`).join('');
-      return `${name}${id}${classes}`;
-    };
-    return [...document.querySelectorAll('body *')].flatMap((element) => {
-      const style = getComputedStyle(element);
-      const rect = element.getBoundingClientRect();
-      if (ignored(element) || rect.width < 1 || rect.height < 1
-        || style.display === 'none' || style.visibility === 'hidden') return [];
-      const escapesViewport = style.position !== 'fixed'
-        && (rect.left < -0.5 || rect.right > viewportWidth + 0.5);
-      const hasHorizontalOverflow = element.scrollWidth > element.clientWidth + 1;
-      if (!escapesViewport && !hasHorizontalOverflow) return [];
-      return [{
-        selector: selector(element),
-        clientWidth: element.clientWidth,
-        scrollWidth: element.scrollWidth,
-        left: Math.round(rect.left * 10) / 10,
-        right: Math.round(rect.right * 10) / 10,
-        viewportWidth,
-        escapesViewport,
-        hasHorizontalOverflow,
-        text: (element.textContent ?? '').trim().replaceAll(/\s+/g, ' ').slice(0, 100),
-      }];
-    });
-  });
-  if (issues.length === 0) return;
-  mkdirSync('test-results/overflow', { recursive: true });
-  const screenshot = `test-results/overflow/${safeLabel(label)}.png`;
-  await page.screenshot({ path: screenshot, fullPage: true });
-  throw new Error(`${label} nested overflow: ${JSON.stringify(issues.slice(0, 12))}; screenshot=${screenshot}`);
-}
-
-async function auditFullStackFlow(scenarioId, difficulty, width) {
-  let auditNow = 0;
-  const auditAdjudicator = createDeterministicRegistry();
-  const auditStore = new GameStore({ now: () => auditNow, adjudicators: auditAdjudicator });
-  const auditServer = await createGameServer({
-    store: auditStore, adjudicator: auditAdjudicator, publicBaseUrl: 'http://127.0.0.1',
-  });
-  await new Promise((resolve) => auditServer.listen(0, '127.0.0.1', resolve));
-  const auditOrigin = `http://127.0.0.1:${auditServer.address().port}`;
-  const joinResponse = await fetch(`${auditOrigin}/api/join`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ deviceId: 'd'.repeat(32), scenarioId, difficulty }),
-  });
-  const player = await joinResponse.json();
-  if (!joinResponse.ok) throw new Error(`overflow audit join failed: ${JSON.stringify(player)}`);
-  const page = await browser.newPage({ viewport: { width, height: width === 320 ? 568 : 844 } });
-  await page.addInitScript((token) => sessionStorage.setItem('breach5-player-token', token), player.token);
-  const scenario = getScenario(scenarioId);
-  const phases = new Set();
-  let actionSequence = 0;
+async function auditLobby() {
+  const harness = await createHarness('lobby');
+  let context;
   try {
-    auditNow = 15_000;
-    await auditStore.tick();
-    await page.goto(`${auditOrigin}/play`);
-    await page.waitForSelector('.mission-card');
-    phases.add(auditStore.state(player.token).round.phase);
-    await assertNoNestedOverflow(page, `${scenarioId}-${difficulty}-${width}-brief`);
+    ({ context } = await newMobilePage(harness.origin));
+    const page = context.pages()[0];
+    await page.waitForSelector('.garage-card');
+    assert.equal(await page.locator('.track-card').count(), 2);
+    assert.equal(await page.locator('.crew-card').count(), 4);
+    assert.equal(await page.locator('.driver-card').count(), 0, 'drivers must wait for a crew selection');
+    assert.equal(await page.locator('.difficulty-card').count(), 2);
+    assert.equal(await page.locator('#join-button').isDisabled(), true);
+    await assertNoHorizontalOverflow(page, 'lobby-320-initial');
+    await assertTouchTargets(page, 'button', 'lobby');
 
-    auditNow = 18_000;
-    await auditStore.tick();
-    for (let step = 0; step < 40; step += 1) {
-      const state = auditStore.state(player.token);
-      phases.add(state.round.phase);
-      await page.goto(`${auditOrigin}/play`);
-      await page.waitForSelector('.mission-card');
-      const stateLabel = `${scenarioId}-${difficulty}-${width}-${state.round.phase}-${step}`;
-      await assertNoNestedOverflow(page, `${stateLabel}-base`);
-      if (scenarioId === 'session-heist' && ['DISCOVER', 'BUILD'].includes(state.round.phase)) {
-        if (state.attackFlow !== null) throw new Error(`RCE flow leaked before execution in ${state.round.phase}`);
-        if (await page.locator('.attack-flow').count()) throw new Error(`RCE flow UI leaked before execution in ${state.round.phase}`);
+    await page.locator('.track-card').first().click();
+    await page.locator('.crew-card').first().click();
+    await page.waitForFunction(() => document.querySelectorAll('.driver-card').length === 2);
+    const firstPair = await page.locator('.driver-card strong').allTextContents();
+    assert.equal(firstPair.length, 2);
+    await page.locator('.crew-card').nth(1).click();
+    await page.waitForFunction(
+      (previous) => {
+        const current = [...document.querySelectorAll('.driver-card strong')].map((node) => node.textContent);
+        return current.length === 2 && current.join('|') !== previous.join('|');
+      },
+      firstPair,
+    );
+    assert.equal(await page.locator('.driver-card').count(), 2);
+    await page.locator('.driver-card').first().click();
+    await page.locator('.difficulty-card').first().click();
+    assert.equal(await page.locator('#join-button').isDisabled(), false);
+    await page.locator('.driver-card').first().scrollIntoViewIfNeeded();
+    await page.waitForFunction(() => [...document.images].every((image) => image.complete && image.naturalWidth > 0));
+    await assertNoHorizontalOverflow(page, 'lobby-320-selected');
+
+    await page.locator('#join-button').click();
+    await page.waitForSelector('.waiting-card, .race-hero');
+    await assertNoHorizontalOverflow(page, 'lobby-320-joined');
+  } finally {
+    if (context) await context.close();
+    await harness.close();
+  }
+}
+
+async function auditCompletePollingStops() {
+  const harness = await createHarness('complete-polling');
+  let context;
+  try {
+    const identity = await api(harness.origin, '/api/join', {
+      method: 'POST',
+      body: {
+        deviceId: 'c'.repeat(32),
+        trackId: TRACKS[0].id,
+        difficulty: DIFFICULTIES[0],
+        crewId: CREWS[0].id,
+        driverId: DRIVERS.find(({ crewId }) => crewId === CREWS[0].id).id,
+      },
+    });
+    harness.setNow(300_000);
+    await harness.store.tick();
+
+    context = await browser.newContext({
+      viewport: { width: 320, height: 568 },
+      reducedMotion: 'reduce',
+    });
+    await context.addInitScript((token) => {
+      sessionStorage.setItem('nitro-grid-player-token', token);
+    }, identity.token);
+    const page = await context.newPage();
+    let stateRequests = 0;
+    page.on('request', (request) => {
+      if (new URL(request.url()).pathname === '/api/state') stateRequests += 1;
+    });
+    await page.goto(`${harness.origin}/play`);
+    await page.waitForSelector('.result-card');
+    assert.equal(await page.locator('.race-timer span').textContent(), 'RACE COMPLETE');
+    const requestsAtComplete = stateRequests;
+    assert.equal(requestsAtComplete, 1);
+    await page.waitForTimeout(2_000);
+    assert.equal(stateRequests, requestsAtComplete, 'COMPLETE kept polling /api/state every 750ms');
+    await assertNoHorizontalOverflow(page, 'complete-polling-stopped-320');
+  } finally {
+    if (context) await context.close();
+    await harness.close();
+  }
+}
+
+async function auditRaceFlow(track, difficulty, crew, flowIndex) {
+  const harness = await createHarness(`${track.id}-${difficulty}`);
+  let context;
+  let screenContext;
+  const driver = DRIVERS.find(({ crewId }) => crew.id === crewId);
+  const injectWrongAnswer = flowIndex === 0;
+  const originalDeviceId = String(flowIndex + 1).padStart(32, '0');
+  assert.ok(driver);
+  try {
+    const identity = await api(harness.origin, '/api/join', {
+      method: 'POST',
+      body: {
+        deviceId: originalDeviceId,
+        trackId: track.id,
+        difficulty,
+        crewId: crew.id,
+        driverId: driver.id,
+      },
+    });
+    harness.setNow(30_000);
+    await harness.store.tick();
+
+    ({ context } = await newMobilePage(harness.origin, identity.token));
+    const page = context.pages()[0];
+    await page.evaluate((value) => localStorage.setItem('nitro-grid-device-id', value), originalDeviceId);
+    const phases = [];
+    const expectedCorrectness = new Map();
+    let answered = 0;
+
+    for (let phaseIndex = 0; phaseIndex < 5; phaseIndex += 1) {
+      const state = harness.store.state(identity.token);
+      phases.push(state.round.phase);
+      assert.ok(['LAUNCH', 'SECTOR_1', 'PIT_STOP', 'SECTOR_2', 'SPRINT'].includes(state.round.phase));
+      assert.ok(state.tasks.length > 0);
+      await page.reload();
+      await page.waitForSelector('.race-hero');
+      await page.waitForSelector('.answer-card');
+      await assertNoHorizontalOverflow(page, `${track.id}-${difficulty}-${state.round.phase}-base`);
+      await assertTouchTargets(page, '.answer-card, .confirm-button', `${track.id}/${difficulty}/${state.round.phase}`);
+
+      const annotations = await page.locator('.evidence-note').count();
+      if (difficulty === 'BEGINNER') assert.ok(annotations > 0, `${state.round.phase} lacks guided evidence`);
+      else assert.equal(annotations, 0, `${state.round.phase} leaked guided evidence`);
+      if (state.round.phase === 'PIT_STOP') assert.equal(await page.locator('.trend-card').count(), 1);
+
+      for (const task of state.tasks) {
+        const source = questions.get(task.id);
+        assert.ok(source, `missing source question ${task.id}`);
+        const correct = source.correctOptionId;
+        const submitWrong = injectWrongAnswer && answered === 0;
+        const selectedOption = submitWrong
+          ? task.options.find(({ id }) => id !== correct)
+          : task.options.find(({ id }) => id === correct);
+        assert.ok(selectedOption, `${task.id} has no ${submitWrong ? 'wrong' : 'correct'} option`);
+        const optionIndex = task.options.findIndex(({ id }) => id === selectedOption.id);
+        assert.ok(optionIndex >= 0, `${task.id} omitted its correct option`);
+        const sourceOption = source.options.find(({ id }) => id === selectedOption.id);
+        const correctOption = source.options.find(({ id }) => id === correct);
+        assert.ok(sourceOption?.feedback);
+        assert.ok(correctOption?.label);
+        expectedCorrectness.set(task.id, !submitWrong);
+
+        const card = page.locator(`#confirm-${task.id}`).locator('..');
+        await card.locator('.answer-card').nth(optionIndex).click();
+        const confirm = page.locator(`#confirm-${task.id}`);
+        await confirm.waitFor({ state: 'visible' });
+        assert.equal(await confirm.isDisabled(), false);
+        await assertNoHorizontalOverflow(page, `${track.id}-${difficulty}-${state.round.phase}-${task.id}-preview`);
+        await confirm.click();
+
+        const feedback = page.locator('.feedback-card');
+        await feedback.waitFor({ state: 'visible' });
+        assert.equal(await feedback.evaluate(
+          (element, expectedClass) => element.classList.contains(expectedClass),
+          submitWrong ? 'wrong' : 'correct',
+        ), true);
+        assert.equal(
+          await feedback.locator('.feedback-flag').textContent(),
+          submitWrong ? '× TIME PENALTY' : '✓ CLEAN LINE',
+        );
+        assert.equal((await feedback.locator('.selected-answer strong').textContent())?.trim(), selectedOption.label);
+        assert.equal((await feedback.locator('.feedback-explanation').textContent())?.trim(), sourceOption.feedback);
+        if (submitWrong) {
+          assert.equal(await feedback.locator('.correct-answer').count(), 1);
+          assert.equal((await feedback.locator('.correct-answer strong').textContent())?.trim(), correctOption.label);
+        } else {
+          assert.equal(await feedback.locator('.correct-answer').count(), 0);
+        }
+        assert.match((await feedback.locator('.race-effect b').textContent()) ?? '', /\S/);
+        await assertNoHorizontalOverflow(page, `${track.id}-${difficulty}-${state.round.phase}-${task.id}-feedback`);
+        await assertTouchTargets(page, '#feedback-continue', `${task.id} feedback`);
+        await page.locator('#feedback-continue').click();
+        await feedback.waitFor({ state: 'detached' });
+        answered += 1;
       }
-      const task = state.tasks.find((item) => !item.selected);
-      if (task) {
-        const tabCount = await page.locator('.evidence-tab').count();
-        for (let index = 0; index < tabCount; index += 1) {
-          await page.locator('.evidence-tab').nth(index).click();
-          await assertNoNestedOverflow(page, `${stateLabel}-${task.id}-evidence-${index}`);
-        }
-        const expected = Array.isArray(scenario.correct[task.id])
-          ? scenario.correct[task.id][0] : scenario.correct[task.id];
-        const optionIndex = task.options.findIndex((option) => option.id === expected);
-        if (optionIndex < 0) throw new Error(`missing correct option for ${task.id}`);
-        await page.locator('.option-button').nth(optionIndex).click();
-        await page.waitForSelector('#confirm-choice:not([disabled])');
-        await assertNoNestedOverflow(page, `${stateLabel}-${task.id}-preview`);
-        const previous = state.observations.length;
-        await page.locator('#confirm-choice').click();
-        for (let wait = 0; wait < 100 && auditStore.state(player.token).observations.length === previous; wait += 1) {
-          await new Promise((resolve) => setTimeout(resolve, 10));
-        }
-        actionSequence += 1;
-        continue;
-      }
-      if (state.round.phase === 'RESULT') {
-        const rawDetails = page.locator('.raw-details');
-        if (await rawDetails.count()) {
-          await rawDetails.locator('summary').click();
-          await assertNoNestedOverflow(page, `${stateLabel}-raw-open`);
-        }
-        if (scenarioId === 'session-heist') {
-          await page.getByText('RCE primitive CONFIRMED', { exact: true }).waitFor();
-          if (state.attackFlow?.steps?.at(-1)?.status !== 'CONFIRMED') throw new Error('RCE flow did not reach confirmed state');
-        }
-        await page.goto(`${auditOrigin}/screen`);
-        await page.waitForSelector('.lane-card');
-        if (scenarioId === 'session-heist') {
-          await page.getByText(/RCE PRIMITIVE CONFIRMED/).waitFor();
-        }
-        await assertNoNestedOverflow(page, `${stateLabel}-spectator-result`);
-        break;
-      }
-      auditNow += 3_000;
-      await auditStore.tick();
+
+      const after = harness.store.state(identity.token);
+      assert.ok(after.tasks.every((task) => (
+        task.selected && task.feedback?.correct === expectedCorrectness.get(task.id)
+      )));
+      await harness.advance(3_100);
     }
-    for (const phase of ['BRIEF', 'DISCOVER', 'BUILD', 'EXECUTE', 'DUEL', 'REVERIFY', 'RESULT']) {
-      if (!phases.has(phase)) throw new Error(`${scenarioId}/${difficulty} missed ${phase} in overflow audit`);
+
+    assert.deepEqual(phases, ['LAUNCH', 'SECTOR_1', 'PIT_STOP', 'SECTOR_2', 'SPRINT']);
+    assert.equal(answered, 7);
+    const result = harness.store.state(identity.token);
+    const expectedCorrect = injectWrongAnswer ? 6 : 7;
+    const expectedBand = injectWrongAnswer ? 'PODIUM' : 'POLE_POSITION';
+    assert.equal(result.round.phase, 'RESULT');
+    assert.equal(result.race.correct, expectedCorrect);
+    assert.equal(result.race.accuracy, injectWrongAnswer ? 86 : 100);
+    assert.equal(result.result.finishBand, expectedBand);
+    assert.equal(result.result.review.length, 7);
+    await page.reload();
+    await page.waitForSelector('.result-card');
+    await page.getByText(injectWrongAnswer ? 'PODIUM FINISH' : 'POLE POSITION', { exact: true }).waitFor();
+    assert.equal(await page.locator('.result-review').count(), 1);
+    const review = page.locator('.result-review');
+    if (await review.evaluate((element) => element.tagName === 'DETAILS' && !element.open)) {
+      await review.locator('summary').click();
     }
-    if (actionSequence !== Object.keys(scenario.tasks).length) {
-      throw new Error(`${scenarioId}/${difficulty} audited ${actionSequence} actions, expected ${Object.keys(scenario.tasks).length}`);
+    assert.equal(await page.locator('.review-item').count(), 7);
+    assert.equal(await page.locator('.review-item.wrong').count(), injectWrongAnswer ? 1 : 0);
+    for (const [index, row] of result.result.review.entries()) {
+      const labels = await page.locator('.review-item').nth(index).locator('.review-answers strong').allTextContents();
+      assert.deepEqual(labels, row.correct
+        ? [row.selectedLabel]
+        : [row.selectedLabel, row.correctOptionLabel]);
+      assert.ok(row.selectedLabel && row.selectedLabel !== row.selected);
+      assert.ok(row.correctOptionLabel && row.correctOptionLabel !== row.correctOptionId);
+    }
+    await assertNoHorizontalOverflow(page, `${track.id}-${difficulty}-result`);
+    await assertTouchTargets(page, '.result-card button, .result-card summary', `${track.id}/${difficulty} result`);
+
+    screenContext = await browser.newContext({
+      viewport: { width: 320, height: 568 },
+      reducedMotion: 'reduce',
+    });
+    const screen = await screenContext.newPage();
+    await screen.goto(`${harness.origin}/screen`);
+    await screen.waitForFunction(() => document.querySelectorAll('.lane-card').length === 2);
+    await screen.waitForFunction(() => document.querySelector('.qr-frame img')?.naturalWidth > 0);
+    await assertNoHorizontalOverflow(screen, `${track.id}-${difficulty}-screen-320`);
+
+    if (injectWrongAnswer) {
+      await page.locator('.result-card .primary-button').click();
+      await page.waitForSelector('.garage-card');
+      assert.equal(await page.evaluate(() => localStorage.getItem('nitro-grid-device-id')), null);
+      await page.locator('.track-card').first().click();
+      await page.locator('.crew-card').first().click();
+      await page.waitForFunction(() => document.querySelectorAll('.driver-card').length === 2);
+      await page.locator('.driver-card').first().click();
+      await page.locator('.difficulty-card').first().click();
+      await page.locator('#join-button').click();
+      await page.waitForSelector('.waiting-card');
+      const retryIdentity = await page.evaluate(() => ({
+        token: sessionStorage.getItem('nitro-grid-player-token'),
+        deviceId: localStorage.getItem('nitro-grid-device-id'),
+      }));
+      assert.match(retryIdentity.token ?? '', /^[A-Za-z0-9_-]{32}$/);
+      assert.notEqual(retryIdentity.token, identity.token);
+      assert.match(retryIdentity.deviceId ?? '', /^[a-f0-9]{32}$/);
+      assert.notEqual(retryIdentity.deviceId, originalDeviceId);
+      const queued = await api(harness.origin, '/api/state', { token: retryIdentity.token });
+      assert.equal(queued.round.phase, 'QUEUED');
+      assert.equal(queued.round.ordinal, 1);
+      assert.equal(queued.queue.selectedTrack, TRACKS[0].id);
+      await assertNoHorizontalOverflow(page, `${track.id}-${difficulty}-retry-queued`);
     }
   } finally {
-    await page.close();
-    await new Promise((resolve) => auditServer.close(resolve));
+    if (screenContext) await screenContext.close();
+    if (context) await context.close();
+    await harness.close();
   }
 }
 
 try {
-  browser = await chromium.launch({ headless: true, executablePath });
-  for (const viewport of [{ width: 320, height: 568 }, { width: 360, height: 640 }, { width: 390, height: 844 }, { width: 412, height: 915 }]) {
-    const page = await browser.newPage({ viewport });
-    await page.goto(`${origin}/play`);
-    await page.waitForSelector('.lobby-card');
-    const before = await page.evaluate(() => ({
-      viewport: innerWidth,
-      documentWidth: document.documentElement.scrollWidth,
-      inputCount: document.querySelectorAll('input, textarea, [contenteditable="true"]').length,
-      joinDisabled: document.querySelector('#join-button')?.disabled,
-      scenarioCount: document.querySelectorAll('.case-card').length,
-      difficultyCount: document.querySelectorAll('.difficulty-card').length,
-      minButtonHeight: Math.min(...[...document.querySelectorAll('button')].map((button) => button.getBoundingClientRect().height)),
-    }));
-    if (before.documentWidth > before.viewport) throw new Error(`lobby horizontal overflow at ${viewport.width}px`);
-    await assertNoNestedOverflow(page, `lobby-${viewport.width}`);
-    if (before.inputCount !== 0) throw new Error('lobby unexpectedly requires free-form input');
-    if (!before.joinDisabled || before.scenarioCount !== 2 || before.difficultyCount !== 2) throw new Error('lobby selection gate is incomplete');
-    if (before.minButtonHeight < 44) throw new Error(`lobby touch target below 44px at ${viewport.width}px`);
-    await page.locator('[data-scenario-id="proxy-panic"]').click();
-    if (!(await page.locator('#join-button').isDisabled())) throw new Error('join enabled before difficulty selection');
-    await page.locator('[data-difficulty="BEGINNER"]').click();
-    if (await page.locator('#join-button').isDisabled()) throw new Error('join stayed disabled after both selections');
-    await page.close();
-  }
-
-  const red = await api('/api/join', {
-    method: 'POST', body: { deviceId: '1'.repeat(32), scenarioId: 'proxy-panic', difficulty: 'BEGINNER' },
+  browser = await chromium.launch({
+    headless: true,
+    executablePath,
   });
-  const blue = await api('/api/join', {
-    method: 'POST', body: { deviceId: '2'.repeat(32), scenarioId: 'proxy-panic', difficulty: 'ADVANCED' },
-  });
-  now = 15_000;
-  await store.tick();
-  now = 18_000;
-  await store.tick();
-
-  const mobile = await browser.newPage({ viewport: { width: 390, height: 844 } });
-  await mobile.addInitScript((playerToken) => sessionStorage.setItem('breach5-player-token', playerToken), red.token);
-  let actionRequests = 0;
-  let previewRequests = 0;
-  let abortNextAction = true;
-  await mobile.route('**/api/preview', async (route) => {
-    previewRequests += 1;
-    await new Promise((resolve) => setTimeout(resolve, 250));
-    await route.continue();
-  });
-  await mobile.route('**/api/action', async (route) => {
-    actionRequests += 1;
-    if (abortNextAction) {
-      abortNextAction = false;
-      await route.abort('failed');
-    } else await route.continue();
-  });
-  await mobile.goto(`${origin}/play`);
-  await mobile.waitForSelector('.option-button');
-  const taskMetrics = await mobile.evaluate(() => ({
-    viewport: innerWidth,
-    documentWidth: document.documentElement.scrollWidth,
-    annotations: document.querySelectorAll('.evidence-annotation').length,
-    codePaneCount: document.querySelectorAll('.code-pane').length,
-    minButtonHeight: Math.min(...[...document.querySelectorAll('button')].map((button) => button.getBoundingClientRect().height)),
-    codePanesWrapped: [...document.querySelectorAll('.code-pane')].every((pane) => {
-      const style = getComputedStyle(pane);
-      return style.whiteSpace === 'pre-wrap' && pane.scrollWidth <= pane.clientWidth + 1;
-    }),
-  }));
-  if (taskMetrics.documentWidth > taskMetrics.viewport) throw new Error('task screen has horizontal overflow');
-  if (taskMetrics.annotations < 1 || taskMetrics.codePaneCount < 1) throw new Error('beginner evidence deck is incomplete');
-  if (taskMetrics.minButtonHeight < 44 || !taskMetrics.codePanesWrapped) throw new Error('task touch/wrapping contract failed');
-  await assertNoNestedOverflow(mobile, 'proxy-beginner-first-task-390');
-
-  await mobile.locator('.option-button').first().click();
-  if (!(await mobile.locator('#confirm-choice').isDisabled())) throw new Error('confirm enabled before the server preview completed');
-  if (previewRequests !== 1 || actionRequests !== 0) throw new Error('preview gate sent the wrong request sequence');
-  await mobile.waitForSelector('#confirm-choice:not([disabled])');
-  if (actionRequests !== 0) throw new Error('first option tap submitted instead of staging a preview');
-  await mobile.locator('#confirm-choice').click();
-  await mobile.waitForFunction(() => document.querySelector('#notice')?.textContent?.includes('다시'));
-  await mobile.waitForSelector('.option-button:not([disabled])');
-  await mobile.locator('.option-button').first().click();
-  await mobile.locator('#confirm-choice').click();
-  await mobile.waitForSelector('.task-complete h2');
-  await mobile.waitForSelector('.observation-recap');
-  await mobile.waitForFunction(() => document.activeElement?.matches('.task-complete h2'));
-  await mobile.close();
-
-  const analyst = await browser.newPage({ viewport: { width: 390, height: 844 } });
-  await analyst.addInitScript((playerToken) => sessionStorage.setItem('breach5-player-token', playerToken), blue.token);
-  await analyst.goto(`${origin}/play`);
-  await analyst.waitForSelector('.option-button');
-  if (await analyst.locator('.evidence-annotation').count()) throw new Error('advanced mode leaked guided annotations');
-  if (!(await analyst.locator('.advanced-note').count())) throw new Error('advanced mode did not render raw-evidence instruction');
-  await analyst.close();
-
-  for (const viewport of [
-    { width: 320, height: 568 }, { width: 360, height: 640 }, { width: 760, height: 900 },
-    { width: 900, height: 900 }, { width: 901, height: 900 }, { width: 1440, height: 900 },
-  ]) {
-    const screen = await browser.newPage({ viewport });
-    await screen.goto(`${origin}/screen`);
-    await screen.waitForSelector('.lane-card');
-    const screenMetrics = await screen.evaluate(() => ({
-      viewport: innerWidth,
-      documentWidth: document.documentElement.scrollWidth,
-      lanes: document.querySelectorAll('.lane-card').length,
-      qrReady: document.querySelector('.qr-frame img')?.naturalWidth > 0,
-    }));
-    if (screenMetrics.documentWidth > screenMetrics.viewport) throw new Error(`spectator screen has horizontal overflow at ${viewport.width}px`);
-    if (screenMetrics.lanes !== 2 || !screenMetrics.qrReady) throw new Error('spectator lane or QR rendering failed');
-    await assertNoNestedOverflow(screen, `spectator-${viewport.width}`);
-    await screen.close();
-  }
-
-  for (const scenarioId of ['proxy-panic', 'session-heist']) {
-    for (const difficulty of ['BEGINNER', 'ADVANCED']) {
-      await auditFullStackFlow(scenarioId, difficulty, 320);
+  await auditLobby();
+  await auditCompletePollingStops();
+  let flowIndex = 0;
+  for (const [trackIndex, track] of TRACKS.entries()) {
+    for (const [difficultyIndex, difficulty] of DIFFICULTIES.entries()) {
+      const crew = CREWS[(trackIndex * DIFFICULTIES.length + difficultyIndex) % CREWS.length];
+      await auditRaceFlow(track, difficulty, crew, flowIndex);
+      flowIndex += 1;
     }
   }
-
-  console.log('UI layout, wrapping, and full-flow interaction checks passed at 320-1440px.');
+  console.log('NITRO GRID 320px lobby, correct/wrong feedback, result, spectator, and four full race flows passed.');
 } finally {
   if (browser) await browser.close();
-  await new Promise((resolve) => server.close(resolve));
 }

@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
-import { link, mkdir, open, readFile, readdir, rename, rm, stat } from 'node:fs/promises';
+import { mkdir, open, readFile, rm, stat } from 'node:fs/promises';
 import http from 'node:http';
 import { isIP } from 'node:net';
 import { basename, join } from 'node:path';
@@ -10,28 +10,25 @@ const root = fileURLToPath(new URL('../', import.meta.url));
 const runtimeDir = join(root, '.runtime');
 const composeFile = join(root, 'compose.yaml');
 const boothEnv = join(runtimeDir, 'booth.env');
-const defaultProject = 'breach5_booth';
-const VERIFY_HEARTBEAT_STALE_MS = 60_000;
-const ATOMIC_TEMP_STALE_MS = 60 * 60_000;
-const COMPOSE_OVERRIDE_KEYS = [
-  'ENGINE_TOKEN', 'WORKER_TOKEN', 'BREACH5_PROOF',
-  'SESSION_ENGINE_TOKEN', 'SESSION_LAB_CLIENT_SECRET', 'SESSION_SIGNING_SECRET', 'SESSION_PROOF',
-  'ROUND_DURATION_MS', 'MAX_PLAYERS',
-  'BREACH5_BIND', 'BREACH5_PORT', 'BREACH5_IMAGE', 'SESSION_ENGINE_IMAGE', 'PUBLIC_BASE_URL',
-];
-const COMPOSE_OVERRIDE_SET = new Set(COMPOSE_OVERRIDE_KEYS);
+const defaultProject = 'breach5_nitro_grid';
+const overrideKeys = new Set([
+  'NITRO_GRID_SEED_SECRET', 'ROUND_DURATION_MS', 'MAX_PLAYERS',
+  'BREACH5_BIND', 'BREACH5_PORT', 'BREACH5_IMAGE', 'PUBLIC_BASE_URL',
+]);
+
+function cleanComposeEnv(source = process.env) {
+  const env = { ...source };
+  for (const key of Object.keys(env)) {
+    const normalized = key.toUpperCase();
+    if (overrideKeys.has(normalized) || normalized.startsWith('COMPOSE_')) delete env[key];
+  }
+  return env;
+}
 
 function run(command, args, { capture = false, allowFailure = false, env = process.env } = {}) {
-  const commandEnv = { ...env };
-  if (command === 'docker' && args[0] === 'compose') {
-    for (const key of Object.keys(commandEnv)) {
-      const normalized = key.toUpperCase();
-      if (COMPOSE_OVERRIDE_SET.has(normalized) || normalized.startsWith('COMPOSE_')) delete commandEnv[key];
-    }
-  }
   const result = spawnSync(command, args, {
     cwd: root,
-    env: commandEnv,
+    env: command === 'docker' && args[0] === 'compose' ? cleanComposeEnv(env) : { ...env },
     encoding: 'utf8',
     stdio: capture ? 'pipe' : 'inherit',
     windowsHide: true,
@@ -48,12 +45,7 @@ function run(command, args, { capture = false, allowFailure = false, env = proce
 
 function runAsync(command, args, { env = process.env } = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
-      cwd: root,
-      env: { ...env },
-      stdio: 'inherit',
-      windowsHide: true,
-    });
+    const child = spawn(command, args, { cwd: root, env: { ...env }, stdio: 'inherit', windowsHide: true });
     child.once('error', reject);
     child.once('exit', (code, signal) => {
       if (code === 0) resolve();
@@ -70,182 +62,55 @@ async function exists(path) {
   try { await stat(path); return true; } catch { return false; }
 }
 
-function processIsAlive(pid) {
-  if (!Number.isInteger(pid) || pid < 1) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return error?.code === 'EPERM';
-  }
-}
-
-async function startManifestHeartbeat(path) {
-  const script = [
-    "const { utimesSync } = require('node:fs');",
-    'const path = process.argv[1];',
-    "const beat = () => { try { const now = new Date(); utimesSync(path, now, now); } catch { process.exit(2); } };",
-    "beat(); process.stdout.write('ready\\n');",
-    'const timer = setInterval(beat, 15_000);',
-    'process.stdin.resume();',
-    "process.stdin.on('end', () => { clearInterval(timer); process.exit(0); });",
-  ].join(' ');
-  const child = spawn(process.execPath, ['-e', script, path], {
-    cwd: root,
-    stdio: ['pipe', 'pipe', 'ignore'],
-    windowsHide: true,
-  });
-  await new Promise((resolve, reject) => {
-    let ready = false;
-    child.once('error', reject);
-    child.once('exit', (code) => {
-      if (!ready) reject(new Error(`verification heartbeat exited before ready with status ${code}`));
-    });
-    child.stdout.once('data', (chunk) => {
-      if (!chunk.toString('utf8').includes('ready')) return reject(new Error('verification heartbeat returned an invalid handshake'));
-      ready = true;
-      resolve();
-    });
-  });
-  return async () => {
-    if (child.exitCode !== null) return;
-    child.stdin.end();
-    await new Promise((resolve) => {
-      const timeout = setTimeout(() => {
-        child.kill();
-        resolve();
-      }, 2_000);
-      child.once('exit', () => {
-        clearTimeout(timeout);
-        resolve();
-      });
-    });
-  };
-}
-
-async function createEnv(path, { port, roundMs, verifyProject = null, publicBaseUrl = null }) {
+async function createEnv(path, { port, roundMs, image, publicBaseUrl }) {
   await mkdir(runtimeDir, { recursive: true });
-  const createdAt = Date.now();
   const text = [
-    `ENGINE_TOKEN=${randomBytes(32).toString('hex')}`,
-    `WORKER_TOKEN=${randomBytes(32).toString('hex')}`,
-    `BREACH5_PROOF=proof_${randomBytes(24).toString('hex')}`,
-    `SESSION_ENGINE_TOKEN=${randomBytes(32).toString('hex')}`,
-    `SESSION_LAB_CLIENT_SECRET=${randomBytes(32).toString('hex')}`,
-    `SESSION_SIGNING_SECRET=${randomBytes(32).toString('hex')}`,
-    `SESSION_PROOF=session_proof_${randomBytes(24).toString('hex')}`,
+    `NITRO_GRID_SEED_SECRET=${randomBytes(32).toString('hex')}`,
     `ROUND_DURATION_MS=${roundMs}`,
-    'MAX_PLAYERS=16',
+    'MAX_PLAYERS=48',
     'BREACH5_BIND=127.0.0.1',
     `BREACH5_PORT=${port}`,
-    `BREACH5_IMAGE=${verifyProject ? `breach5-booth-game:${verifyProject}` : 'breach5-booth-game:local'}`,
-    `SESSION_ENGINE_IMAGE=${verifyProject ? `breach5-session-engine:${verifyProject}` : 'breach5-session-engine:local'}`,
-    `PUBLIC_BASE_URL=${publicBaseUrl ?? (port === 0 ? 'http://127.0.0.1' : `http://127.0.0.1:${port}`)}`,
-    ...(verifyProject ? [
-      `BREACH5_VERIFY_PROJECT=${verifyProject}`,
-      `BREACH5_VERIFY_CREATED_AT=${createdAt}`,
-      `BREACH5_VERIFY_OWNER_PID=${process.pid}`,
-    ] : []),
+    `BREACH5_IMAGE=${image}`,
+    `PUBLIC_BASE_URL=${publicBaseUrl}`,
     '',
   ].join('\n');
-  const temporary = `${path}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
-  let handle = await open(temporary, 'wx', 0o600);
+  const handle = await open(path, 'wx', 0o600);
   try {
     await handle.writeFile(text, 'utf8');
     await handle.sync();
-    await handle.close();
-    handle = null;
-    await link(temporary, path);
   } finally {
-    if (handle) await handle.close().catch(() => {});
-    await rm(temporary, { force: true });
+    await handle.close();
   }
   return path;
 }
 
-async function upgradeLegacyBoothEnv() {
-  const current = await readFile(boothEnv, 'utf8');
-  const values = Object.fromEntries(current
-    .split(/\r?\n/)
-    .filter((line) => line && !line.startsWith('#') && line.includes('='))
-    .map((line) => line.split(/=(.*)/s).slice(0, 2)));
-  const additions = {
-    SESSION_ENGINE_TOKEN: randomBytes(32).toString('hex'),
-    SESSION_LAB_CLIENT_SECRET: randomBytes(32).toString('hex'),
-    SESSION_SIGNING_SECRET: randomBytes(32).toString('hex'),
-    SESSION_PROOF: `session_proof_${randomBytes(24).toString('hex')}`,
-    SESSION_ENGINE_IMAGE: 'breach5-session-engine:local',
-  };
-  const missing = Object.keys(additions).filter((key) => !values[key]);
-  const replaceLegacyDuration = values.ROUND_DURATION_MS === '300000';
-  if (missing.length === 0 && !replaceLegacyDuration) return;
-
-  const lines = current.replace(/\s*$/, '').split(/\r?\n/);
-  if (replaceLegacyDuration) {
-    const index = lines.findIndex((line) => line.startsWith('ROUND_DURATION_MS='));
-    if (index >= 0) lines[index] = 'ROUND_DURATION_MS=180000';
-  }
-  for (const key of missing) lines.push(`${key}=${additions[key]}`);
-  lines.push('');
-
-  const temporary = `${boothEnv}.${process.pid}.${randomBytes(6).toString('hex')}.upgrade`;
-  let handle = await open(temporary, 'wx', 0o600);
-  try {
-    await handle.writeFile(lines.join('\n'), 'utf8');
-    await handle.sync();
-    await handle.close();
-    handle = null;
-    await rename(temporary, boothEnv);
-  } finally {
-    if (handle) await handle.close().catch(() => {});
-    await rm(temporary, { force: true });
-  }
-}
-
-async function ensureBoothEnv() {
-  if (!(await exists(boothEnv))) {
-    try {
-      await createEnv(boothEnv, { port: 18090, roundMs: 180_000 });
-    } catch (error) {
-      if (error?.code !== 'EEXIST' || !(await exists(boothEnv))) throw error;
-    }
-  }
-  await upgradeLegacyBoothEnv();
-  return boothEnv;
-}
-
-async function readEnvFile(path) {
+async function readEnv(path) {
   const values = {};
   for (const line of (await readFile(path, 'utf8')).split(/\r?\n/)) {
     if (!line || line.startsWith('#')) continue;
     const separator = line.indexOf('=');
-    if (separator < 1) continue;
-    values[line.slice(0, separator)] = line.slice(separator + 1);
+    if (separator > 0) values[line.slice(0, separator)] = line.slice(separator + 1);
   }
   return values;
 }
 
-async function runtimeAddresses(envFile) {
-  const values = await readEnvFile(envFile);
-  const port = Number.parseInt(values.BREACH5_PORT ?? '', 10);
-  if (!Number.isInteger(port) || port < 1 || port > 65_535) throw new Error('BREACH5_PORT in the runtime env must be a valid TCP port');
-  const bind = values.BREACH5_BIND ?? '127.0.0.1';
-  if (isIP(bind) === 0) throw new Error('BREACH5_BIND must be an IP address');
-  const readinessHost = bind === '0.0.0.0' ? '127.0.0.1' : bind === '::' ? '::1' : bind;
-  const readinessAuthority = isIP(readinessHost) === 6 ? `[${readinessHost}]` : readinessHost;
-  let base;
-  try {
-    base = new URL(values.PUBLIC_BASE_URL ?? '');
-  } catch {
-    throw new Error('PUBLIC_BASE_URL in the runtime env must be an absolute URL');
+async function ensureBoothEnv() {
+  if (await exists(boothEnv)) {
+    const values = await readEnv(boothEnv).catch(() => ({}));
+    const valid = /^[a-f0-9]{64}$/i.test(values.NITRO_GRID_SEED_SECRET ?? '')
+      && values.ROUND_DURATION_MS === '300000'
+      && values.BREACH5_PORT === '18090';
+    if (!valid) await rm(boothEnv, { force: true });
   }
-  if (!['http:', 'https:'].includes(base.protocol)) throw new Error('PUBLIC_BASE_URL must use http or https');
-  if (base.username || base.password) throw new Error('PUBLIC_BASE_URL must not contain credentials');
-  return {
-    readyUrl: `http://${readinessAuthority}:${port}/readyz`,
-    participantUrl: new URL('/play', base).toString(),
-    screenUrl: new URL('/screen', base).toString(),
-  };
+  if (!(await exists(boothEnv))) {
+    await createEnv(boothEnv, {
+      port: 18090,
+      roundMs: 300_000,
+      image: 'breach5-nitro-grid:local',
+      publicBaseUrl: 'http://127.0.0.1:18090',
+    });
+  }
+  return boothEnv;
 }
 
 function checkNode() {
@@ -258,12 +123,29 @@ function checkDocker() {
   run('docker', ['compose', 'version'], { capture: true });
 }
 
-async function configCheck(envFile, project = defaultProject) {
+function offlineCheck() {
+  run(process.execPath, ['tools/check.mjs']);
+}
+
+function configCheck(envFile, project = defaultProject) {
   run('docker', composeArgs(project, envFile, 'config', '--quiet'));
 }
 
-function offlineCheck() {
-  run(process.execPath, ['tools/check.mjs']);
+async function runtimeAddresses(envFile) {
+  const values = await readEnv(envFile);
+  const port = Number.parseInt(values.BREACH5_PORT ?? '', 10);
+  const bind = values.BREACH5_BIND ?? '127.0.0.1';
+  if (!Number.isInteger(port) || port < 1 || port > 65_535) throw new Error('BREACH5_PORT must be a valid TCP port');
+  if (isIP(bind) === 0) throw new Error('BREACH5_BIND must be an IP address');
+  const host = bind === '0.0.0.0' ? '127.0.0.1' : bind === '::' ? '::1' : bind;
+  const authority = isIP(host) === 6 ? `[${host}]` : host;
+  const base = new URL(values.PUBLIC_BASE_URL);
+  if (!['http:', 'https:'].includes(base.protocol) || base.username || base.password) throw new Error('PUBLIC_BASE_URL must be a credential-free HTTP(S) URL');
+  return {
+    readyUrl: `http://${authority}:${port}/readyz`,
+    participantUrl: new URL('/play', base).toString(),
+    screenUrl: new URL('/screen', base).toString(),
+  };
 }
 
 async function waitHttp(url, timeoutMs = 90_000) {
@@ -281,45 +163,44 @@ async function waitHttp(url, timeoutMs = 90_000) {
 function cleanupProject(project, envFile, { removeImages = false } = {}) {
   const args = ['down', '--remove-orphans'];
   if (removeImages) args.push('--rmi', 'all');
-  const result = run('docker', composeArgs(project, envFile, ...args), {
-    allowFailure: true,
-  });
-  return result.status === 0;
+  return run('docker', composeArgs(project, envFile, ...args), { allowFailure: true }).status === 0;
+}
+
+function publishedTarget(project, envFile) {
+  const output = run('docker', composeArgs(project, envFile, 'port', 'game', '3000'), { capture: true }).stdout?.trim() ?? '';
+  const match = output.match(/:(\d+)$/);
+  const port = Number.parseInt(match?.[1] ?? '', 10);
+  if (!Number.isInteger(port) || port < 1 || port > 65_535) throw new Error(`could not resolve verification port from: ${output}`);
+  return `http://127.0.0.1:${port}`;
 }
 
 async function createVerificationProxy() {
   let upstream = null;
   const server = http.createServer((request, response) => {
     if (!upstream) {
-      const body = Buffer.from('upstream not ready\n');
-      response.writeHead(503, { 'Content-Type': 'text/plain', 'Content-Length': String(body.length), Connection: 'close' });
-      return response.end(body);
+      response.writeHead(503, { Connection: 'close' });
+      return response.end('upstream not ready\n');
     }
     const target = new URL(request.url ?? '/', upstream);
-    const headers = { ...request.headers, host: target.host, connection: 'close' };
-    delete headers['proxy-connection'];
-    const outgoing = http.request(target, { method: request.method, headers }, (incoming) => {
+    const outgoing = http.request(target, {
+      method: request.method,
+      headers: { ...request.headers, host: target.host, connection: 'close' },
+    }, (incoming) => {
       response.writeHead(incoming.statusCode ?? 502, { ...incoming.headers, Connection: 'close' });
       incoming.pipe(response);
     });
     outgoing.on('error', () => {
-      if (!response.headersSent) response.writeHead(502, { 'Content-Type': 'text/plain', Connection: 'close' });
+      if (!response.headersSent) response.writeHead(502, { Connection: 'close' });
       response.end('upstream unavailable\n');
     });
     request.pipe(outgoing);
   });
-  server.maxHeadersCount = 32;
-  server.headersTimeout = 8_000;
-  server.requestTimeout = 10_000;
   await new Promise((resolve, reject) => {
     server.once('error', reject);
     server.listen(0, '127.0.0.1', resolve);
   });
   const address = server.address();
-  if (!address || typeof address === 'string') {
-    server.close();
-    throw new Error('could not create the loopback verification proxy');
-  }
+  if (!address || typeof address === 'string') throw new Error('could not create verification proxy');
   return {
     origin: `http://127.0.0.1:${address.port}`,
     setUpstream(value) { upstream = new URL(value); },
@@ -327,105 +208,30 @@ async function createVerificationProxy() {
   };
 }
 
-async function recoverStaleVerifications() {
-  const entries = await readdir(runtimeDir, { withFileTypes: true });
-  for (const entry of entries) {
-    if (!entry.isFile()) continue;
-    const temporary = /^verify-.*\.env\..*\.tmp$/.test(entry.name);
-    const match = entry.name.match(/^verify-(breach5_verify_[0-9]+_[a-f0-9]{8})(?:\.recover-([0-9]+)-([0-9]+)-[a-f0-9]{8})?\.env$/);
-    if (!temporary && !match) continue;
-    const path = join(runtimeDir, entry.name);
-    const metadata = await stat(path).catch(() => null);
-    if (!metadata) continue;
-    const ageMs = Date.now() - metadata.mtimeMs;
-    if (temporary) {
-      if (ageMs >= ATOMIC_TEMP_STALE_MS) await rm(path, { force: true });
-      continue;
-    }
-    const project = match[1];
-    const claimantPid = Number.parseInt(match[2] ?? '', 10);
-    const claimStartedAt = Number.parseInt(match[3] ?? '', 10);
-    if (Number.isInteger(claimantPid) && Number.isInteger(claimStartedAt)
-      && processIsAlive(claimantPid)
-      && (Date.now() - claimStartedAt < VERIFY_HEARTBEAT_STALE_MS || ageMs < VERIFY_HEARTBEAT_STALE_MS)) {
-      continue;
-    }
-    const values = await readEnvFile(path).catch(() => ({}));
-    const ownerPid = Number.parseInt(values.BREACH5_VERIFY_OWNER_PID ?? '', 10);
-    const createdAt = Number.parseInt(values.BREACH5_VERIFY_CREATED_AT ?? '', 10);
-    if (values.BREACH5_VERIFY_PROJECT !== project
-      || values.BREACH5_IMAGE !== `breach5-booth-game:${project}`
-      || values.SESSION_ENGINE_IMAGE !== `breach5-session-engine:${project}`
-      || !Number.isInteger(ownerPid) || ownerPid < 1
-      || !Number.isInteger(createdAt) || createdAt < 1) {
-      console.warn(`Preserving untrusted stale verification manifest: ${path}`);
-      continue;
-    }
-    if (processIsAlive(ownerPid) && ageMs < VERIFY_HEARTBEAT_STALE_MS) continue;
-    const claimed = join(runtimeDir, `verify-${project}.recover-${process.pid}-${Date.now()}-${randomBytes(4).toString('hex')}.env`);
-    try {
-      await rename(path, claimed);
-    } catch (error) {
-      if (error?.code === 'ENOENT') continue;
-      throw error;
-    }
-    let stopClaimHeartbeat;
-    try {
-      stopClaimHeartbeat = await startManifestHeartbeat(claimed);
-    } catch (error) {
-      await rename(claimed, path).catch(() => {});
-      throw error;
-    }
-    console.log(`Recovering stale verification project ${project}...`);
-    const cleaned = cleanupProject(project, claimed, { removeImages: true });
-    await stopClaimHeartbeat();
-    if (!cleaned) {
-      const original = join(runtimeDir, `verify-${project}.env`);
-      await rename(claimed, original).catch(() => {});
-      throw new Error('stale verification cleanup failed; preserved its manifest for recovery');
-    }
-    await rm(claimed, { force: true });
-  }
-}
-
-function publishedTarget(project, envFile) {
-  const output = run('docker', composeArgs(project, envFile, 'port', 'game', '3000'), { capture: true }).stdout?.trim() ?? '';
-  const match = output.match(/:(\d+)$/);
-  const port = Number.parseInt(match?.[1] ?? '', 10);
-  if (!Number.isInteger(port) || port < 1 || port > 65_535) throw new Error(`could not resolve the verification port from: ${output}`);
-  return `http://127.0.0.1:${port}`;
-}
-
 async function up() {
   checkNode();
   checkDocker();
   offlineCheck();
   const envFile = await ensureBoothEnv();
-  await configCheck(envFile);
+  configCheck(envFile);
   const addresses = await runtimeAddresses(envFile);
   try {
     run('docker', composeArgs(defaultProject, envFile, 'up', '--detach', '--build', '--wait'));
     await waitHttp(addresses.readyUrl);
   } catch (error) {
     run('docker', composeArgs(defaultProject, envFile, 'logs', '--no-color', '--tail', '120'), { allowFailure: true });
-    if (!cleanupProject(defaultProject, envFile)) {
-      throw new Error(`${error.message}; scoped cleanup also failed, so ${envFile} was preserved`);
-    }
+    cleanupProject(defaultProject, envFile);
     throw error;
   }
-  console.log('\nBREACH//5 is ready.');
+  console.log('\nBREACH//5: NITRO GRID is ready.');
   console.log(`Participant: ${addresses.participantUrl}`);
   console.log(`Screen:      ${addresses.screenUrl}`);
-  console.log('Mobile devices need a reviewed PUBLIC_BASE_URL and bind address; loopback is the safe default.');
+  console.log('Mobile devices require a reviewed bind address and PUBLIC_BASE_URL; loopback is the safe default.');
 }
 
 async function down() {
-  if (!(await exists(boothEnv))) {
-    console.log('BREACH//5 has no local runtime configuration.');
-    return;
-  }
-  const envFile = await ensureBoothEnv();
-  run('docker', composeArgs(defaultProject, envFile, 'down', '--remove-orphans'));
+  if (!(await exists(boothEnv))) return console.log('NITRO GRID has no local runtime configuration.');
+  cleanupProject(defaultProject, boothEnv);
 }
 
 async function verify() {
@@ -433,69 +239,34 @@ async function verify() {
   checkDocker();
   offlineCheck();
   await mkdir(runtimeDir, { recursive: true });
-  await recoverStaleVerifications();
-  const project = `breach5_verify_${process.pid}_${randomBytes(4).toString('hex')}`;
-  const verifyEnv = join(runtimeDir, `verify-${project}.env`);
+  const project = `nitro_grid_verify_${process.pid}_${randomBytes(4).toString('hex')}`;
+  const envFile = join(runtimeDir, `${project}.env`);
   const proxy = await createVerificationProxy();
-  try {
-    await createEnv(verifyEnv, {
-      port: 0,
-      roundMs: 30_000,
-      verifyProject: project,
-      publicBaseUrl: proxy.origin,
-    });
-  } catch (error) {
-    await proxy.close();
-    throw error;
-  }
+  await createEnv(envFile, {
+    port: 0,
+    roundMs: 30_000,
+    image: `breach5-nitro-grid:${project}`,
+    publicBaseUrl: proxy.origin,
+  });
   let failure = null;
-  let stopHeartbeat = null;
   try {
-    stopHeartbeat = await startManifestHeartbeat(verifyEnv);
-    await configCheck(verifyEnv, project);
-    run('docker', composeArgs(project, verifyEnv, 'up', '--detach', '--build', '--wait'));
-    proxy.setUpstream(publishedTarget(project, verifyEnv));
-    const targetUrl = proxy.origin;
-    await waitHttp(`${targetUrl}/readyz`);
-    const secrets = Object.fromEntries((await readFile(verifyEnv, 'utf8'))
-      .split(/\r?\n/)
-      .filter(Boolean)
-      .map((line) => line.split(/=(.*)/s).slice(0, 2)));
-    await runAsync(process.execPath, ['tests/live-contract.mjs'], {
-      env: {
-        ...process.env,
-        TARGET_URL: targetUrl,
-        AUDIT_ENGINE_TOKEN: secrets.ENGINE_TOKEN,
-        AUDIT_WORKER_TOKEN: secrets.WORKER_TOKEN,
-        AUDIT_BREACH5_PROOF: secrets.BREACH5_PROOF,
-        AUDIT_SESSION_ENGINE_TOKEN: secrets.SESSION_ENGINE_TOKEN,
-        AUDIT_SESSION_LAB_CLIENT_SECRET: secrets.SESSION_LAB_CLIENT_SECRET,
-        AUDIT_SESSION_SIGNING_SECRET: secrets.SESSION_SIGNING_SECRET,
-        AUDIT_SESSION_PROOF: secrets.SESSION_PROOF,
-      },
-    });
-
-    const logResult = run('docker', composeArgs(project, verifyEnv, 'logs', '--no-color'), { capture: true });
-    const logs = `${logResult.stdout ?? ''}\n${logResult.stderr ?? ''}`;
-    for (const key of [
-      'ENGINE_TOKEN', 'WORKER_TOKEN', 'BREACH5_PROOF',
-      'SESSION_ENGINE_TOKEN', 'SESSION_LAB_CLIENT_SECRET', 'SESSION_SIGNING_SECRET', 'SESSION_PROOF',
-    ]) {
-      if (secrets[key] && logs.includes(secrets[key])) throw new Error(`${key} leaked into container logs`);
-    }
-    console.log('BREACH//5 live contract and log audit passed.');
+    configCheck(envFile, project);
+    run('docker', composeArgs(project, envFile, 'up', '--detach', '--build', '--wait'));
+    proxy.setUpstream(publishedTarget(project, envFile));
+    await waitHttp(`${proxy.origin}/readyz`);
+    await runAsync(process.execPath, ['tests/live-contract.mjs'], { env: { ...process.env, TARGET_URL: proxy.origin } });
+    const values = await readEnv(envFile);
+    const logsResult = run('docker', composeArgs(project, envFile, 'logs', '--no-color'), { capture: true });
+    const logs = `${logsResult.stdout ?? ''}\n${logsResult.stderr ?? ''}`;
+    if (logs.includes(values.NITRO_GRID_SEED_SECRET)) throw new Error('NITRO_GRID_SEED_SECRET leaked into container logs');
+    console.log('NITRO GRID live contract and runtime-secret log audit passed.');
   } catch (error) {
     failure = error;
   } finally {
     await proxy.close();
-    if (stopHeartbeat) await stopHeartbeat();
-    const cleaned = cleanupProject(project, verifyEnv, { removeImages: true });
-    if (cleaned) {
-      await rm(verifyEnv, { force: true });
-    } else {
-      const cleanupError = new Error(`scoped cleanup failed; preserved ${verifyEnv} for recovery`);
-      failure = failure ? new Error(`${failure.message}; ${cleanupError.message}`) : cleanupError;
-    }
+    const cleaned = cleanupProject(project, envFile, { removeImages: true });
+    if (cleaned) await rm(envFile, { force: true });
+    else failure = new Error(`${failure?.message ?? 'verification failed'}; scoped cleanup failed and ${envFile} was preserved`);
   }
   if (failure) throw failure;
 }
@@ -504,7 +275,7 @@ async function doctor() {
   checkNode();
   checkDocker();
   const envFile = await ensureBoothEnv();
-  await configCheck(envFile);
+  configCheck(envFile);
   console.log(`Node.js ${process.versions.node}`);
   console.log('Docker daemon reachable');
   console.log('Compose configuration valid');
@@ -512,20 +283,18 @@ async function doctor() {
 }
 
 async function status() {
-  if (!(await exists(boothEnv))) return console.log('BREACH//5 has not been initialized.');
-  const envFile = await ensureBoothEnv();
-  run('docker', composeArgs(defaultProject, envFile, 'ps'));
+  if (!(await exists(boothEnv))) return console.log('NITRO GRID has not been initialized.');
+  run('docker', composeArgs(defaultProject, boothEnv, 'ps'));
 }
 
 async function logs() {
-  if (!(await exists(boothEnv))) return console.log('BREACH//5 has not been initialized.');
-  const envFile = await ensureBoothEnv();
-  run('docker', composeArgs(defaultProject, envFile, 'logs', '--no-color', '--tail', '200'));
+  if (!(await exists(boothEnv))) return console.log('NITRO GRID has not been initialized.');
+  run('docker', composeArgs(defaultProject, boothEnv, 'logs', '--no-color', '--tail', '200'));
 }
 
 async function reset() {
   await down();
-  if (await exists(boothEnv)) await rm(boothEnv, { force: true });
+  await rm(boothEnv, { force: true });
   await up();
 }
 
@@ -537,6 +306,6 @@ if (command === 'help' || !commands[command]) {
 }
 
 commands[command]().catch((error) => {
-  console.error(`BREACH//5 ${command} failed: ${error.message}`);
+  console.error(`NITRO GRID ${command} failed: ${error.message}`);
   process.exit(1);
 });

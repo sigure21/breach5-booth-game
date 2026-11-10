@@ -7,8 +7,6 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
 
 COPY src ./src
-COPY engine ./engine
-COPY tools ./tools
 
 USER node
 

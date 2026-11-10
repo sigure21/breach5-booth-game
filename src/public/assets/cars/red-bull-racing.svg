@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 160" role="img" aria-labelledby="title desc">
+  <title id="title">Red Bull Racing colorway car</title>
+  <desc id="desc">An original dark blue, red, and yellow open-wheel racing car illustration made for Nitro Grid.</desc>
+  <defs>
+    <linearGradient id="body" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#3155ff"/><stop offset="1" stop-color="#101d62"/></linearGradient>
+    <filter id="glow" x="-40%" y="-80%" width="180%" height="260%"><feGaussianBlur stdDeviation="5"/></filter>
+  </defs>
+  <ellipse cx="202" cy="133" rx="150" ry="9" fill="#3155ff" opacity=".25" filter="url(#glow)"/>
+  <g stroke-linejoin="round">
+    <path d="M31 106 60 99l23-42h60l34 20 105 5 44 20 35 6-7 21H45z" fill="url(#body)" stroke="#8ba0ff" stroke-width="3"/>
+    <path d="m144 58 18 24h70l-38-24z" fill="#09112d" stroke="#6e84ff" stroke-width="3"/>
+    <path d="M280 83h64l18 15-75 1zM39 100h50l-13 13H28z" fill="#ff334f" stroke="#ff8c9d" stroke-width="2"/>
+    <path d="M175 91h100l-31 18h-103z" fill="#ffd52a" opacity=".95"/>
+    <path d="M190 99h55" stroke="#101d62" stroke-width="5" stroke-linecap="round"/>
+    <circle cx="105" cy="124" r="23" fill="#070b19" stroke="#18234d" stroke-width="5"/><circle cx="105" cy="124" r="10" fill="#ffd52a" stroke="#fff1a0" stroke-width="3"/>
+    <circle cx="302" cy="124" r="23" fill="#070b19" stroke="#18234d" stroke-width="5"/><circle cx="302" cy="124" r="10" fill="#ffd52a" stroke="#fff1a0" stroke-width="3"/>
+    <path d="M112 73 132 83l-19 9" fill="none" stroke="#ff334f" stroke-width="5" stroke-linecap="round"/>
+  </g>
+</svg>

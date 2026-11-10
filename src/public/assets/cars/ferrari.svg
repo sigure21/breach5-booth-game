@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 160" role="img" aria-labelledby="title desc">
+  <title id="title">Ferrari colorway car</title>
+  <desc id="desc">An original red, black, and yellow open-wheel racing car illustration made for Nitro Grid.</desc>
+  <defs>
+    <linearGradient id="body" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#ff3347"/><stop offset="1" stop-color="#9c0013"/></linearGradient>
+    <filter id="glow" x="-40%" y="-80%" width="180%" height="260%"><feGaussianBlur stdDeviation="5"/></filter>
+  </defs>
+  <ellipse cx="202" cy="133" rx="150" ry="9" fill="#ef1a2d" opacity=".28" filter="url(#glow)"/>
+  <g stroke-linejoin="round">
+    <path d="M31 106 60 99l23-42h60l34 20 105 5 44 20 35 6-7 21H45z" fill="url(#body)" stroke="#ff9ba7" stroke-width="3"/>
+    <path d="m144 58 18 24h70l-38-24z" fill="#1b090c" stroke="#ff6f7f" stroke-width="3"/>
+    <path d="M280 83h64l18 15-75 1zM39 100h50l-13 13H28z" fill="#121212" stroke="#575757" stroke-width="2"/>
+    <path d="M166 91h111l-30 18H132z" fill="#ffd54a"/>
+    <path d="M190 99h55" stroke="#9c0013" stroke-width="5" stroke-linecap="round"/>
+    <circle cx="105" cy="124" r="23" fill="#090909" stroke="#2a1719" stroke-width="5"/><circle cx="105" cy="124" r="10" fill="#ffd54a" stroke="#fff1a3" stroke-width="3"/>
+    <circle cx="302" cy="124" r="23" fill="#090909" stroke="#2a1719" stroke-width="5"/><circle cx="302" cy="124" r="10" fill="#ffd54a" stroke="#fff1a3" stroke-width="3"/>
+    <path d="M104 72h43" stroke="#ffd54a" stroke-width="5" stroke-linecap="round"/>
+  </g>
+</svg>

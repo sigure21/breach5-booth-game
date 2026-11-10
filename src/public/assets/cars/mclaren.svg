@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 160" role="img" aria-labelledby="title desc">
+  <title id="title">McLaren colorway car</title>
+  <desc id="desc">An original papaya orange, black, and blue open-wheel racing car illustration made for Nitro Grid.</desc>
+  <defs>
+    <linearGradient id="body" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#ffad32"/><stop offset="1" stop-color="#d74c00"/></linearGradient>
+    <filter id="glow" x="-40%" y="-80%" width="180%" height="260%"><feGaussianBlur stdDeviation="5"/></filter>
+  </defs>
+  <ellipse cx="202" cy="133" rx="150" ry="9" fill="#ff8700" opacity=".29" filter="url(#glow)"/>
+  <g stroke-linejoin="round">
+    <path d="M31 106 60 99l23-42h60l34 20 105 5 44 20 35 6-7 21H45z" fill="url(#body)" stroke="#ffd097" stroke-width="3"/>
+    <path d="m144 58 18 24h70l-38-24z" fill="#11151b" stroke="#ffb55a" stroke-width="3"/>
+    <path d="M280 83h64l18 15-75 1zM39 100h50l-13 13H28z" fill="#11151b" stroke="#4f5866" stroke-width="2"/>
+    <path d="M151 92h127l-30 17H128z" fill="#57d5ff"/>
+    <path d="M185 100h65" stroke="#102a42" stroke-width="5" stroke-linecap="round"/>
+    <circle cx="105" cy="124" r="23" fill="#07090c" stroke="#252b34" stroke-width="5"/><circle cx="105" cy="124" r="10" fill="#57d5ff" stroke="#b9eeff" stroke-width="3"/>
+    <circle cx="302" cy="124" r="23" fill="#07090c" stroke="#252b34" stroke-width="5"/><circle cx="302" cy="124" r="10" fill="#57d5ff" stroke="#b9eeff" stroke-width="3"/>
+    <path d="m103 70 45 7-40 8" fill="none" stroke="#57d5ff" stroke-width="5" stroke-linecap="round"/>
+  </g>
+</svg>

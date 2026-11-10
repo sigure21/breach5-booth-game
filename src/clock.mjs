@@ -1,19 +1,18 @@
-export const PRODUCTION_ROUND_MS = 180_000;
+export const PRODUCTION_ROUND_MS = 300_000;
 
 export const PHASES = Object.freeze([
-  { id: 'JOIN', start: 0, end: 15 },
-  { id: 'BRIEF', start: 15, end: 23 },
-  { id: 'DISCOVER', start: 23, end: 48 },
-  { id: 'BUILD', start: 48, end: 88 },
-  { id: 'EXECUTE', start: 88, end: 103 },
-  { id: 'DUEL', start: 103, end: 138 },
-  { id: 'REVERIFY', start: 138, end: 163 },
-  { id: 'RESULT', start: 163, end: 180 },
+  { id: 'JOIN', start: 0, end: 30 },
+  { id: 'LAUNCH', start: 30, end: 55 },
+  { id: 'SECTOR_1', start: 55, end: 105 },
+  { id: 'PIT_STOP', start: 105, end: 140 },
+  { id: 'SECTOR_2', start: 140, end: 195 },
+  { id: 'SPRINT', start: 195, end: 250 },
+  { id: 'RESULT', start: 250, end: 300 },
 ]);
 
 export function assertRoundDuration(roundMs) {
   if (!Number.isInteger(roundMs) || roundMs < 3_000 || roundMs > PRODUCTION_ROUND_MS) {
-    throw new Error('ROUND_DURATION_MS must be an integer between 3000 and 180000');
+    throw new Error('ROUND_DURATION_MS must be an integer between 3000 and 300000');
   }
   return roundMs;
 }
@@ -22,14 +21,15 @@ export function phaseBounds(roundMs = PRODUCTION_ROUND_MS) {
   assertRoundDuration(roundMs);
   return PHASES.map((phase, index) => ({
     ...phase,
-    startMs: index === 0 ? 0 : Math.round((phase.start / 180) * roundMs),
-    endMs: index === PHASES.length - 1 ? roundMs : Math.round((phase.end / 180) * roundMs),
+    startMs: index === 0 ? 0 : Math.round((phase.start / 300) * roundMs),
+    endMs: index === PHASES.length - 1 ? roundMs : Math.round((phase.end / 300) * roundMs),
   }));
 }
 
 export function phaseAtElapsed(elapsedMs, roundMs = PRODUCTION_ROUND_MS) {
   const normalized = Math.max(0, Math.min(roundMs - 1, Math.floor(elapsedMs)));
-  return phaseBounds(roundMs).find((phase) => normalized >= phase.startMs && normalized < phase.endMs) ?? phaseBounds(roundMs).at(-1);
+  const bounds = phaseBounds(roundMs);
+  return bounds.find((phase) => normalized >= phase.startMs && normalized < phase.endMs) ?? bounds.at(-1);
 }
 
 export function clockAt(nowMs, { roundMs = PRODUCTION_ROUND_MS, epochMs = 0 } = {}) {

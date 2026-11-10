@@ -1,242 +1,237 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createDeterministicRegistry } from '../src/adjudicator.mjs';
 import { GameStore } from '../src/game.mjs';
-import { getScenario } from '../src/scenarios/index.mjs';
+import { buildRaceDeck } from '../src/race/seed.mjs';
 
-function fixture({ maxPlayers = 16 } = {}) {
+const QUESTION_BANK = Array.from({ length: 12 }, (_, index) => ({
+  id: `q${index + 1}`,
+  category: `category-${index % 7}`,
+  question: `Question ${index + 1}`,
+  evidence: {
+    BEGINNER: [{ label: 'hint', value: `beginner-${index + 1}` }],
+    ADVANCED: [{ label: 'log', value: `advanced-${index + 1}` }],
+  },
+  options: [
+    { id: 'safe', label: 'Safe response' },
+    { id: 'unsafe', label: 'Unsafe response' },
+  ],
+  correctOptionId: 'safe',
+  explanation: `Why safe ${index + 1}`,
+}));
+
+function fixture({ maxPlayers = 48, seedSecret = 'test-seed', sessionTtlMs } = {}) {
   let now = 0;
   let device = 0;
-  const adjudicators = createDeterministicRegistry();
   const store = new GameStore({
-    now: () => now, adjudicators, roundMs: 18_000, epochMs: 0, maxPlayers,
+    now: () => now,
+    roundMs: 30_000,
+    epochMs: 0,
+    maxPlayers,
+    seedSecret,
+    sessionTtlMs,
+    questionBank: QUESTION_BANK,
+    questionBankVersion: 'test-v1',
   });
-  const join = (scenarioId = 'proxy-panic', difficulty = 'BEGINNER') => {
+  const join = (overrides = {}) => {
     device += 1;
-    return store.join(null, device.toString(16).padStart(32, '0'), scenarioId, difficulty);
+    return store.join(
+      null,
+      device.toString(16).padStart(32, '0'),
+      overrides.trackId ?? 'human-firewall',
+      overrides.difficulty ?? 'BEGINNER',
+      overrides.crewId ?? 'red-bull-racing',
+      overrides.driverId ?? 'max-verstappen',
+    );
   };
-  return { store, adjudicators, join, setNow: (value) => { now = value; }, getNow: () => now };
+  return { store, join, setNow: (value) => { now = value; }, getNow: () => now };
 }
 
-function submitVisible(store, player, scenario, counter) {
-  const state = store.state(player.token);
+function answerVisible(store, identity, choice = 'safe', counter = { value: 1 }) {
+  const state = store.state(identity.token);
   for (const task of state.tasks) {
-    const expected = scenario.correct[task.id];
-    const choice = Array.isArray(expected) ? expected[0] : expected;
-    store.submit(player.token, {
+    const response = store.submit(identity.token, {
       roundId: state.round.roundId,
       task: task.id,
       choice,
       actionId: `action_${String(counter.value).padStart(4, '0')}`,
     });
     counter.value += 1;
+    assert.equal(response.feedback.correct, choice === 'safe');
   }
-  return state.tasks.map(({ id }) => id);
+  return state.tasks.length;
 }
 
-async function solveFullStack(scenarioId) {
-  const context = fixture();
-  const { store, join, setNow } = context;
-  const player = join(scenarioId, 'ADVANCED');
-  const scenario = getScenario(scenarioId);
-  const counter = { value: 1 };
-
-  setNow(1_500); await store.tick();
-  setNow(1_800); await store.tick();
-  assert.equal(store.state(player.token).round.phase, 'DISCOVER');
-  assert.equal(store.state(player.token).attackFlow, null, 'attack flow must not reveal answers before execution');
-  submitVisible(store, player, scenario, counter);
-
-  setNow(2_100); await store.tick();
-  assert.equal(store.state(player.token).round.phase, 'BUILD');
-  assert.equal(store.state(player.token).attackFlow, null, 'attack flow must stay hidden until a baseline exists');
-  submitVisible(store, player, scenario, counter);
-
-  setNow(2_400); await store.tick();
-  assert.equal(store.state(player.token).round.phase, 'EXECUTE');
-  assert.equal(store.state(player.token).execution.proofReached, true);
-  if (scenarioId === 'session-heist') {
-    assert.equal(store.state(player.token).attackFlow?.confirmed, true);
-    assert.equal(store.state(player.token).attackFlow?.steps.at(-1)?.status, 'CONFIRMED');
-  } else {
-    assert.equal(store.state(player.token).attackFlow, null);
-  }
-
-  setNow(2_700); await store.tick();
-  assert.equal(store.state(player.token).round.phase, 'DUEL');
-  submitVisible(store, player, scenario, counter);
-
-  setNow(3_000); await store.tick();
-  assert.equal(store.state(player.token).round.phase, 'REVERIFY');
-  setNow(3_300); await store.tick();
-  const state = store.state(player.token);
-  assert.equal(state.round.phase, 'RESULT');
-  return { ...context, player, state };
-}
-
-test('new joins require allowlisted scenario and difficulty values', () => {
-  const { store } = fixture();
-  assert.throws(() => store.join(null, '0'.repeat(32), null, 'BEGINNER'), (error) => error.code === 'invalid_scenario');
-  assert.throws(() => store.join(null, '1'.repeat(32), 'proxy-panic', 'EASY'), (error) => error.code === 'invalid_difficulty');
-  assert.throws(() => store.join(null, '2'.repeat(32), 'invented', 'BEGINNER'), (error) => error.code === 'invalid_scenario');
+test('HMAC deck is deterministic, unique, balanced, and phase-quota bound', () => {
+  const input = { ordinal: 4, trackId: 'secure-builder', version: 'v1', secret: 'fixed' };
+  const first = buildRaceDeck(QUESTION_BANK, input);
+  const second = buildRaceDeck(QUESTION_BANK, input);
+  assert.deepEqual(first.map(({ id }) => id), second.map(({ id }) => id));
+  assert.equal(new Set(first.map(({ id }) => id)).size, 7);
+  assert.deepEqual(first.map(({ racePhase }) => racePhase), [
+    'LAUNCH', 'SECTOR_1', 'SECTOR_1', 'PIT_STOP', 'SECTOR_2', 'SECTOR_2', 'SPRINT',
+  ]);
+  assert.ok(new Set(first.map(({ category }) => category)).size >= 5);
 });
 
-test('same device reconnect preserves its original scenario and difficulty', () => {
+test('join fields are allowlisted and same-device reconnect is immutable', () => {
   const { store } = fixture();
   const deviceId = '0123456789abcdef0123456789abcdef';
-  const original = store.join(null, deviceId, 'proxy-panic', 'BEGINNER');
-  const attemptedChange = store.join(null, deviceId, 'session-heist', 'ADVANCED');
-  assert.deepEqual(attemptedChange, original);
-  assert.equal(original.scenarioId, 'proxy-panic');
-  assert.equal(original.difficulty, 'BEGINNER');
-  assert.equal(store.getRound(0, 'proxy-panic').players.size, 1);
-  assert.equal(store.getRound(0, 'session-heist').players.size, 0);
+  assert.throws(() => store.join(null, deviceId, 'invented', 'BEGINNER', 'red-bull-racing', 'max-verstappen'),
+    (error) => error.code === 'invalid_track');
+  assert.throws(() => store.join(null, deviceId, 'human-firewall', 'EASY', 'red-bull-racing', 'max-verstappen'),
+    (error) => error.code === 'invalid_difficulty');
+  assert.throws(() => store.join(null, deviceId, 'human-firewall', 'BEGINNER', 'formula-one', 'max-verstappen'),
+    (error) => error.code === 'invalid_crew');
+  assert.throws(() => store.join(null, deviceId, 'human-firewall', 'BEGINNER', 'red-bull-racing', 'real-driver'),
+    (error) => error.code === 'invalid_driver');
+  assert.throws(() => store.join(null, deviceId, 'human-firewall', 'BEGINNER', 'red-bull-racing', 'charles-leclerc'),
+    (error) => error.code === 'invalid_driver');
+
+  const original = store.join(null, deviceId, 'human-firewall', 'BEGINNER', 'red-bull-racing', 'max-verstappen');
+  const reconnect = store.join(null, deviceId, 'secure-builder', 'ADVANCED', 'ferrari', 'charles-leclerc');
+  assert.deepEqual(reconnect, original);
 });
 
-test('capacity is global across scenario lanes and late participants queue', () => {
-  const { store, join } = fixture({ maxPlayers: 2 });
-  assert.match(join('proxy-panic').roundId, /^r0-/);
-  assert.match(join('session-heist').roundId, /^r0-/);
-  assert.match(join('proxy-panic').roundId, /^r1-/);
-  assert.match(join('session-heist').roundId, /^r1-/);
-  assert.throws(() => join('proxy-panic'), (error) => error.code === 'capacity');
+test('capacity is global across tracks and overflow queues to the next race', () => {
+  const { join } = fixture({ maxPlayers: 2 });
+  assert.match(join({ trackId: 'human-firewall' }).roundId, /^r0-/);
+  assert.match(join({ trackId: 'secure-builder' }).roundId, /^r0-/);
+  assert.match(join({ trackId: 'human-firewall' }).roundId, /^r1-/);
+  assert.match(join({ trackId: 'secure-builder' }).roundId, /^r1-/);
+  assert.throws(() => join(), (error) => error.code === 'capacity');
 });
 
-test('one participant seals as FULL_STACK and receives both teams tasks once', async () => {
+test('accelerated sessions cannot renew beyond the retained round lifetime', async () => {
   const { store, join, setNow } = fixture();
-  const player = join('session-heist');
-  setNow(1_500); await store.tick();
-  setNow(1_800); await store.tick();
-  const state = store.state(player.token);
-  assert.equal(state.player.mode, 'FULL_STACK');
-  assert.equal(state.player.team, 'FULL');
-  assert.deepEqual(state.tasks.map(({ id }) => id), ['sh_surface', 'sh_anomaly']);
-  assert.equal(store.requiredKeys(store.getRound(0, 'session-heist'), 'DISCOVER').length, 2);
+  const racer = join();
+  const roundKey = '0:human-firewall';
+  const player = store.players.get(racer.token);
+  const retentionCutoff = 4 * 30_000;
+
+  assert.equal(player.hardExpiresAt, retentionCutoff);
+  assert.equal(player.expiresAt, retentionCutoff);
+  setNow(retentionCutoff - 1);
+  assert.equal(store.state(racer.token).round.phase, 'COMPLETE');
+  assert.equal(store.players.get(racer.token).expiresAt, retentionCutoff);
+  assert.equal(store.rounds.has(roundKey), true);
+
+  setNow(retentionCutoff);
+  await store.tick();
+  assert.equal(store.players.has(racer.token), false);
+  assert.equal(store.devices.has(player.deviceId), false);
+  assert.equal(store.rounds.has(roundKey), false);
+  assert.throws(() => store.state(racer.token), (error) => error.code === 'unauthorized');
 });
 
-test('two participants seal into RED and BLUE with team-specific work', async () => {
+test('unanswered public tasks do not leak answer keys or explanations', async () => {
   const { store, join, setNow } = fixture();
-  const red = join('proxy-panic');
-  const blue = join('proxy-panic', 'ADVANCED');
-  setNow(1_500); await store.tick();
-  setNow(1_800); await store.tick();
-  assert.equal(store.state(red.token).player.mode, 'TEAMS');
-  assert.equal(store.state(red.token).player.team, 'RED');
-  assert.equal(store.state(blue.token).player.team, 'BLUE');
-  assert.deepEqual(store.state(red.token).tasks.map(({ id }) => id), ['trust_boundary']);
-  assert.deepEqual(store.state(blue.token).tasks.map(({ id }) => id), ['anomaly']);
+  const racer = join({ difficulty: 'ADVANCED' });
+  setNow(3_000); await store.tick();
+  const state = store.state(racer.token);
+  assert.equal(state.round.phase, 'LAUNCH');
+  assert.equal(state.tasks.length, 1);
+  assert.equal(state.tasks[0].feedback, null);
+  assert.doesNotMatch(JSON.stringify(state.tasks), /correctOptionId|Why safe/);
+  assert.match(JSON.stringify(state.tasks[0].evidence), /advanced-/);
 });
 
-test('scenario cohorts do not leak actions or previews into one another', async () => {
+test('accuracy uses the full seven-question deck rather than only submitted answers', async () => {
   const { store, join, setNow } = fixture();
-  const proxy = join('proxy-panic');
-  const session = join('session-heist');
-  setNow(1_500); await store.tick();
-  setNow(1_800); await store.tick();
-  store.submit(proxy.token, {
-    roundId: 'r0-proxy-panic', task: 'trust_boundary', choice: 'parser_mismatch', actionId: 'isolated_action_01',
+  const racer = join();
+  setNow(3_000); await store.tick();
+  const state = store.state(racer.token);
+  const response = store.submit(racer.token, {
+    roundId: state.round.roundId,
+    task: state.tasks[0].id,
+    choice: 'safe',
+    actionId: 'accuracy_01',
   });
-  const sessionState = store.state(session.token);
-  assert.equal(sessionState.scenario.id, 'session-heist');
-  assert.ok(sessionState.tasks.every(({ selected }) => selected === null));
-  assert.equal(store.getRound(0, 'session-heist').actions.size, 0);
+  assert.equal(response.race.answered, 1);
+  assert.equal(response.race.correct, 1);
+  assert.equal(response.race.possible, 7);
+  assert.equal(response.race.accuracy, 14);
+  assert.equal(store.state(racer.token).race.accuracy, 14);
 });
 
-test('completed evidence responses advance before the phase ceiling', async () => {
+test('actions are phase-bound, idempotent, locked, and return immediate reasoning', async () => {
   const { store, join, setNow } = fixture();
-  const player = join('proxy-panic');
-  const scenario = getScenario('proxy-panic');
-  const counter = { value: 1 };
-  setNow(1_500); await store.tick();
-  setNow(1_800); await store.tick();
-  const deadline = store.state(player.token).round.phaseEndsAt;
-  submitVisible(store, player, scenario, counter);
-  setNow(2_100); await store.tick();
-  const state = store.state(player.token);
-  assert.equal(state.round.phase, 'BUILD');
-  assert.ok(2_100 < deadline, 'DISCOVER should finish before its maximum deadline');
-});
-
-test('missing responses never become hidden default choices', async () => {
-  const { store, join, setNow } = fixture();
-  const player = join('proxy-panic');
-  setNow(1_500); await store.tick();
-  setNow(1_800); await store.tick();
-  setNow(4_300); await store.tick();
-  assert.equal(store.state(player.token).round.phase, 'BUILD');
-  setNow(8_300); await store.tick();
-  const execution = store.state(player.token).execution;
-  assert.equal(execution.proofReached, false);
-  assert.equal(execution.reason, 'incomplete_submission');
-  assert.ok(Object.values(store.getRound(0, 'proxy-panic').scenario.aggregate(new Map())).every((value) => value === null));
-});
-
-test('actions are phase-bound, allowlisted, idempotent, and first choice locked', async () => {
-  const { store, join, setNow } = fixture();
-  const player = join('proxy-panic');
-  setNow(1_500); await store.tick();
-  setNow(1_800); await store.tick();
+  const racer = join();
+  setNow(3_000); await store.tick();
+  const state = store.state(racer.token);
   const action = {
-    roundId: 'r0-proxy-panic', task: 'trust_boundary', choice: 'parser_mismatch', actionId: 'choice_lock_01',
+    roundId: state.round.roundId,
+    task: state.tasks[0].id,
+    choice: 'unsafe',
+    actionId: 'choice_lock_01',
   };
-  assert.deepEqual(store.submit(player.token, action), { ok: true, selected: 'parser_mismatch' });
-  assert.deepEqual(store.submit(player.token, action), { ok: true, duplicate: true });
-  assert.match(store.state(player.token).observations[0].observation, /경로 표현/);
-  assert.throws(() => store.submit(player.token, { ...action, choice: 'backend_down', actionId: 'choice_lock_02' }),
+  const first = store.submit(racer.token, action);
+  assert.equal(first.feedback.correct, false);
+  assert.equal(first.feedback.correctOptionId, 'safe');
+  assert.match(first.feedback.explanation, /Why safe/);
+  const replay = store.submit(racer.token, action);
+  assert.equal(replay.duplicate, true);
+  const { duplicate, ...replayedResponse } = replay;
+  assert.equal(duplicate, true);
+  assert.deepEqual(replayedResponse, first);
+  assert.throws(() => store.submit(racer.token, { ...action, choice: 'safe' }),
+    (error) => error.code === 'idempotency_conflict');
+  assert.throws(() => store.submit(racer.token, { ...action, choice: 'safe', actionId: 'choice_lock_02' }),
     (error) => error.code === 'choice_locked');
-  assert.throws(() => store.submit(player.token, {
-    roundId: 'r0-proxy-panic', task: 'prefix', choice: 'command_substitution', actionId: 'wrong_phase_001',
+  const sectorQuestion = store.getRound(0, 'human-firewall').deck.find(({ racePhase }) => racePhase === 'SECTOR_1');
+  assert.throws(() => store.submit(racer.token, {
+    ...action, task: sectorQuestion.id, actionId: 'wrong_phase_01', choice: 'safe',
   }), (error) => error.code === 'phase_closed');
-  assert.throws(() => store.submit(player.token, {
-    roundId: 'r0-proxy-panic', task: 'trust_boundary', choice: 'arbitrary', actionId: 'bad_choice_0001',
-  }), (error) => error.code === 'invalid_choice');
 });
 
-test('tentative preview uses allowlisted choices without mutating the round', async () => {
+test('seven correct responses activate launch, nitro, fast pit, aero and final deploy', async () => {
   const { store, join, setNow } = fixture();
-  const player = join('proxy-panic');
-  const scenario = getScenario('proxy-panic');
+  const racer = join();
   const counter = { value: 1 };
-  setNow(1_500); await store.tick();
-  setNow(1_800); await store.tick();
-  submitVisible(store, player, scenario, counter);
-  setNow(2_100); await store.tick();
-  const before = store.getRound(0, 'proxy-panic').actions.size;
-  const preview = store.preview(player.token, {
-    roundId: 'r0-proxy-panic', task: 'prefix', choice: 'command_substitution',
-  });
-  assert.match(preview.preview.request, /x\$\(printenv\$\{IFS\}BREACH5_PROOF\)x/);
-  assert.equal(store.getRound(0, 'proxy-panic').actions.size, before);
-  assert.throws(() => store.preview(player.token, {
-    roundId: 'r0-proxy-panic', task: 'prefix', choice: 'free-form-command',
-  }), (error) => error.code === 'invalid_choice');
+  setNow(3_000); await store.tick();
+  for (const [phase, at, expectedCount] of [
+    ['LAUNCH', 3_000, 1],
+    ['SECTOR_1', 3_300, 2],
+    ['PIT_STOP', 3_600, 1],
+    ['SECTOR_2', 3_900, 2],
+    ['SPRINT', 4_200, 1],
+  ]) {
+    setNow(at); await store.tick();
+    const state = store.state(racer.token);
+    assert.equal(state.round.phase, phase);
+    assert.equal(answerVisible(store, racer, 'safe', counter), expectedCount);
+  }
+  setNow(4_500); await store.tick();
+  const result = store.state(racer.token);
+  assert.equal(result.round.phase, 'RESULT');
+  assert.equal(result.result.outcome, 'POLE_POSITION');
+  assert.equal(result.race.correct, 7);
+  assert.equal(result.race.launchBoost, true);
+  assert.equal(result.race.nitro, 3);
+  assert.equal(result.race.pitTimeMs, 1_900);
+  assert.equal(result.race.aeroActive, true);
+  assert.equal(result.race.nitroDeploy, true);
+  assert.equal(result.result.review.length, 7);
+  assert.ok(result.result.review.every((entry) => (
+    entry.selected === 'safe'
+    && entry.selectedLabel === 'Safe response'
+    && entry.correctOptionId === 'safe'
+    && entry.correctOptionLabel === 'Safe response'
+  )));
+  const reconnected = store.join(racer.token, null, null, null, null, null);
+  const restoredResult = store.state(reconnected.token).result;
+  assert.ok(restoredResult.review.every((entry) => (
+    entry.selectedLabel === 'Safe response'
+    && entry.correctOptionLabel === 'Safe response'
+  )), 'server labels must survive a reconnect without a browser-side option cache');
+  assert.equal(store.stats.perfectLaps, 1);
 });
 
-test('idempotency keys are scoped per participant and empty lanes become IDLE', async () => {
+test('different tracks keep actions and seeded decks isolated', async () => {
   const { store, join, setNow } = fixture();
-  const red = join('proxy-panic');
-  const blue = join('proxy-panic');
-  setNow(1_500); await store.tick();
-  setNow(1_800); await store.tick();
-  store.submit(red.token, {
-    roundId: 'r0-proxy-panic', task: 'trust_boundary', choice: 'parser_mismatch', actionId: 'shared_action_01',
-  });
-  store.submit(blue.token, {
-    roundId: 'r0-proxy-panic', task: 'anomaly', choice: 'route_views_differ', actionId: 'shared_action_01',
-  });
-  assert.equal(store.getRound(0, 'proxy-panic').actions.size, 2);
-  const idle = store.screenState().lanes.find(({ scenario }) => scenario.id === 'session-heist');
-  assert.equal(idle.round.phase, 'IDLE');
+  const human = join({ trackId: 'human-firewall' });
+  const builder = join({ trackId: 'secure-builder' });
+  setNow(3_000); await store.tick();
+  answerVisible(store, human);
+  assert.equal(store.state(builder.token).observations.length, 0);
+  assert.equal(store.getRound(0, 'secure-builder').actions.size, 0);
 });
-
-for (const scenarioId of ['proxy-panic', 'session-heist']) {
-  test(`${scenarioId} reaches a real breach then an effective regression-tested patch`, async () => {
-    const { state } = await solveFullStack(scenarioId);
-    assert.equal(state.result.outcome, 'BREACHED_THEN_CONTAINED');
-    assert.equal(state.result.baseline.proofReached, true);
-    assert.equal(state.result.patch.effective, true);
-    assert.deepEqual(state.result.incompleteTasks, []);
-    assert.equal(state.result.redScore, state.result.redPossible);
-    assert.equal(state.result.blueScore, state.result.bluePossible);
-  });
-}

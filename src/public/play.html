@@ -3,26 +3,29 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#07111d">
-  <title>BREACH//5 · 모바일 플레이</title>
+  <meta name="theme-color" content="#071019">
+  <meta name="description" content="5분 동안 보안 판단으로 니트로를 획득하는 OWASP Korea 2026 모바일 부스 게임">
+  <title>BREACH//5 · NITRO GRID</title>
   <link rel="stylesheet" href="/assets/app.css">
 </head>
 <body class="play-body">
-  <div class="ambient ambient-red" aria-hidden="true"></div>
-  <div class="ambient ambient-blue" aria-hidden="true"></div>
+  <div class="grid-glow" aria-hidden="true"></div>
   <main class="mobile-shell">
     <header class="mobile-header">
-      <a class="wordmark" href="/play" aria-label="BREACH 5 홈">
-        <span>BREACH</span><b>//5</b>
+      <a class="wordmark" href="/play" aria-label="NITRO GRID 처음으로">
+        <span>BREACH//5</span><b>NITRO GRID</b>
       </a>
-      <span class="live-chip"><i aria-hidden="true"></i> LIVE LAB</span>
+      <span class="live-chip"><i aria-hidden="true"></i> BOOTH LIVE</span>
     </header>
-    <div id="connection" class="connection" role="status">서버 연결 확인 중</div>
+    <div id="connection" class="connection" role="status">그리드 연결 확인 중</div>
     <div id="notice" class="notice" role="alert" hidden></div>
-    <section id="app" class="app-stage"></section>
+    <section id="app" class="app-stage" aria-live="polite"></section>
     <footer class="mobile-footer">
-      <span>OWASP Korea 2026 · Evidence Lab</span>
-      <a href="/screen">관전자 화면</a>
+      <div class="footer-copy">
+        <span>OWASP Korea 2026 · Security Racing Lab</span>
+        <small>비공식·비상업적 교육용 · EA SPORTS, F1, 각 팀·선수와 비제휴</small>
+      </div>
+      <a href="/screen">라이브 전광판</a>
     </footer>
   </main>
   <noscript>이 게임은 JavaScript가 필요합니다.</noscript>

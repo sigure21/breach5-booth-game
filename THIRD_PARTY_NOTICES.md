@@ -1,34 +1,29 @@
 # Third-party notices
 
-## Proxy Panic design lineage
-
-The isolated adjudication engine is a new booth-oriented adaptation of the
-raw request-target/canonical route trust-boundary model used in the MIT-licensed
-`sigure21/ctf-proxy-panic` educational challenge. It does not contain or claim
-to reproduce vulnerable Collabora or Nextcloud product code.
+This file covers software dependencies. Driver-panel media and motorsport-related
+names are documented separately in [`docs/MEDIA_SOURCES.md`](docs/MEDIA_SOURCES.md).
+Those media files and marks are not relicensed under this repository's MIT
+license.
 
 ## qrcode
 
-The `qrcode` npm package is distributed under the MIT license. See its package
-metadata and installed license for the exact copyright notice.
+The `qrcode` npm package is distributed under the MIT License. The installed
+package contains its copyright and license text.
+
+- Project: <https://github.com/soldair/node-qrcode>
+- Package version: see `package-lock.json`
 
 ## playwright-core
 
-The UI verification tool uses `playwright-core`, distributed under the
-Apache License 2.0. See its package metadata and installed `LICENSE` file for
-the exact copyright and license text.
+The verification tools use `playwright-core`, distributed under the Apache
+License 2.0. The installed package contains its copyright and license text.
 
-## Session Heist reference
+- Project: <https://github.com/microsoft/playwright>
+- Package version: see `package-lock.json`
 
-The educational scenario design cites Simon Koeck's public write-up,
-["Google DevSite Flask Session Pickle RCE"](https://simonkoeck.com/writeups/google-devsite-flask-session-pickle-rce).
-The article is used as a factual
-reference and is not copied into this repository. The `$90,000` label remains
-an author-reported reward claim, not an independently verified payment or a CVE.
+## Security-content references
 
-## Python runtime packages
-
-The internal Session Heist engine installs the exact versions listed in
-`engine/session-requirements.txt`: Flask 3.1.2 and Gunicorn 23.0.0. Their
-transitive packages and license metadata are installed into the container by
-`pip`; consult the corresponding upstream distributions for complete notices.
+The game links to public guidance and reports from NIST, CISA, OWASP, FIDO
+Alliance, Microsoft, Google Cloud/Mandiant, ENISA, and Verizon. Those works are
+references, not bundled copies. The exact links and review date are recorded in
+[`docs/CONTENT_SOURCES.md`](docs/CONTENT_SOURCES.md).
